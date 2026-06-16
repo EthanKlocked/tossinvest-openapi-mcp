@@ -1,5 +1,5 @@
 {
-  "name": "tossinvest-openapi-mcp",
+  "name": "@ethanklocked/tossinvest-openapi-mcp",
   "version": "0.1.0",
   "description": "Safe-by-default MCP server for the official Toss Securities Open API.",
   "type": "module",
@@ -14,7 +14,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "audit:prod": "npm audit --omit=dev"
   },
-  "keywords": ["mcp", "toss", "tossinvest", "openapi", "trading"],
+  "keywords": ["mcp", "model-context-protocol", "toss", "tossinvest", "openapi", "typescript"],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",

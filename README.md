@@ -19,7 +19,15 @@ This package is designed for developers who want read-only account, market, and 
 
 ## Install and run
 
+This repository is currently distributed from GitHub source only. It has not been published to npm under an EthanKlocked-owned package.
+
+Important: the unscoped npm name `tossinvest-openapi-mcp` is already used by a different npm package, so do not install or run that package expecting this repository's code.
+
+Clone this repository, then install and build locally:
+
 ```bash
+git clone https://github.com/EthanKlocked/tossinvest-openapi-mcp.git
+cd tossinvest-openapi-mcp
 npm install
 npm run build
 npm test
@@ -35,12 +43,14 @@ Do not put real secrets in committed files. Prefer passing env vars from your lo
 
 ## MCP client configuration example
 
+Use the local cloned path:
+
 ```json
 {
   "mcpServers": {
     "tossinvest": {
       "command": "node",
-      "args": ["/absolute/path/to/tossinvest-openapi-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/cloned/tossinvest-openapi-mcp/dist/index.js"],
       "env": {
         "TOSS_API_KEY": "${TOSS_API_KEY}",
         "TOSS_SECRET_KEY": "${TOSS_SECRET_KEY}",
@@ -50,6 +60,8 @@ Do not put real secrets in committed files. Prefer passing env vars from your lo
   }
 }
 ```
+
+If this project is later published to npm, use a package name owned by the maintainer, such as `@ethanklocked/tossinvest-openapi-mcp`, rather than the already-taken unscoped name.
 
 ## Environment variables
 
