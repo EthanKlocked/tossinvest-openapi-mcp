@@ -61,6 +61,16 @@ function estimateAmount(request: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
+function requirePositiveDecimal(fieldName: 'quantity' | 'price' | 'orderAmount', request: Record<string, unknown>, failures: string[]): void {
+  if (request[fieldName] === undefined || request[fieldName] === null || request[fieldName] === '') return;
+  const parsed = decimal(request[fieldName]);
+  if (parsed === undefined) {
+    failures.push(`${fieldName} must be a finite number`);
+    return;
+  }
+  if (parsed <= 0) failures.push(`${fieldName} must be greater than 0`);
+}
+
 export function evaluateOrderGate(operation: OrderOperation, config: TossInvestConfig, input: OrderGateInput): OrderGateResult {
   const dryRun = input.dryRun !== false;
   const failures: string[] = [];
@@ -76,6 +86,12 @@ export function evaluateOrderGate(operation: OrderOperation, config: TossInvestC
   if (symbol && config.blockedSymbols.includes(symbol)) failures.push(`symbol ${symbol} is blocked by BLOCKED_SYMBOLS`);
   else if (symbol && config.allowedSymbols.length > 0 && !config.allowedSymbols.includes(symbol)) failures.push(`symbol ${symbol} is not included in ALLOWED_SYMBOLS`);
   else if (!symbol && operation !== 'cancel') failures.push('request.symbol is required for symbol policy checks');
+
+  if (operation !== 'cancel') {
+    requirePositiveDecimal('quantity', input.request, failures);
+    requirePositiveDecimal('price', input.request, failures);
+    requirePositiveDecimal('orderAmount', input.request, failures);
+  }
 
   if (estimatedAmount !== undefined && currency === 'KRW' && estimatedAmount > config.maxOrderKrw) {
     failures.push(`estimated order amount ${estimatedAmount} exceeds MAX_ORDER_KRW=${config.maxOrderKrw}`);

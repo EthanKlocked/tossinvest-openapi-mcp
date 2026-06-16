@@ -56,6 +56,6 @@ export function loadConfig(env: Env = process.env): TossInvestConfig {
     maxOrderUsd: parseNumber(env.MAX_ORDER_USD, 0),
     allowedSymbols: parseSymbolList(env.ALLOWED_SYMBOLS),
     blockedSymbols: parseSymbolList(env.BLOCKED_SYMBOLS),
-    baseUrl: env.TOSS_BASE_URL || DEFAULT_BASE_URL
+    baseUrl: DEFAULT_BASE_URL
   };
 }

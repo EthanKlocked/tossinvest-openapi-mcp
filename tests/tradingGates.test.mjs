@@ -20,6 +20,23 @@ test('real create requires all safety gates and respects amount limit', () => {
   assert.match(overLimit.failures.join(' '), /MAX_ORDER_KRW/);
 });
 
+test('real order execution blocks non-positive quantity, price, and orderAmount values', () => {
+  const config = loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' });
+  const base = { symbol: '005930', side: 'BUY', orderType: 'LIMIT', currency: 'KRW' };
+
+  const zeroQuantity = evaluateOrderGate('create', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { ...base, quantity: '0', price: '70000' } });
+  assert.equal(zeroQuantity.shouldExecute, false);
+  assert.match(zeroQuantity.failures.join(' '), /quantity must be greater than 0/);
+
+  const negativePrice = evaluateOrderGate('create', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { ...base, quantity: '1', price: '-1' } });
+  assert.equal(negativePrice.shouldExecute, false);
+  assert.match(negativePrice.failures.join(' '), /price must be greater than 0/);
+
+  const negativeOrderAmount = evaluateOrderGate('create', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { ...base, orderAmount: '-100' } });
+  assert.equal(negativeOrderAmount.shouldExecute, false);
+  assert.match(negativeOrderAmount.failures.join(' '), /orderAmount must be greater than 0/);
+});
+
 test('blocked symbols take precedence over allowed symbols', () => {
   const config = loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930', BLOCKED_SYMBOLS: '005930' });
   const result = evaluateOrderGate('create', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '1', currency: 'KRW' } });

@@ -2,6 +2,8 @@
 
 Safe-by-default local stdio MCP server for the official Toss Securities / 토스증권 Open API.
 
+This package is an independent developer tool and is not affiliated with, endorsed by, or sponsored by Toss Securities.
+
 This package is designed for developers who want read-only account, market, and order data in an MCP client, with optional order operations protected by multiple explicit safety gates.
 
 ## Safety defaults

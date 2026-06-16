@@ -16,6 +16,11 @@ test('loadConfig defaults to read-only safe mode and zero max order amounts', ()
   assert.deepEqual(config.blockedSymbols, []);
 });
 
+test('loadConfig ignores TOSS_BASE_URL and always uses official Toss Open API origin', () => {
+  const config = loadConfig({ TOSS_BASE_URL: 'https://example.invalid', TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' });
+  assert.equal(config.baseUrl, 'https://openapi.tossinvest.com');
+});
+
 test('loadConfig parses booleans, limits, account sequence, and symbol policies', () => {
   const config = loadConfig({
     TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret', TOSS_ACCOUNT_SEQ: '7', ENABLE_TRADING: 'true',
