@@ -32,3 +32,16 @@ test('order_create performs official POST only when all gates pass', async () =>
   assert.equal(calls[1].input, 'https://openapi.tossinvest.com/api/v1/orders');
   assert.equal(calls[1].method, 'POST');
 });
+
+test('order_create rejects non-LIMIT order types even when gates pass', async () => {
+  const calls = [];
+  const config = loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret', TOSS_ACCOUNT_SEQ: '1', ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '1000', ALLOWED_SYMBOLS: '005930' });
+  const client = new TossInvestClient(config, async (input, init) => {
+    calls.push({ input: String(input), method: init?.method, body: init?.body });
+    return new Response(JSON.stringify({ orderId: 'should-not-happen' }), { status: 200 });
+  });
+  const result = await executeTool('order_create', { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { symbol: '005930', side: 'BUY', orderType: 'MARKET', quantity: '1', price: '1', currency: 'KRW' } }, { client, config });
+  assert.equal(result.shouldExecute, false);
+  assert.match(result.failures.join('\n'), /orderType must be LIMIT/);
+  assert.equal(calls.length, 0);
+});

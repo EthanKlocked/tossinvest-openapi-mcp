@@ -61,6 +61,20 @@ function estimateAmount(request: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
+function normalizeOrderType(orderType: unknown): string | undefined {
+  return typeof orderType === 'string' && orderType.trim() ? orderType.trim().toUpperCase() : undefined;
+}
+
+function requireLimitOrder(operation: OrderOperation, request: Record<string, unknown>, failures: string[]): void {
+  if (operation !== 'create') return;
+  const orderType = normalizeOrderType(request.orderType);
+  if (!orderType) {
+    failures.push('request.orderType must be LIMIT for real order creation');
+    return;
+  }
+  if (orderType !== 'LIMIT') failures.push(`request.orderType must be LIMIT; received ${orderType}`);
+}
+
 function requirePositiveDecimal(fieldName: 'quantity' | 'price' | 'orderAmount', request: Record<string, unknown>, failures: string[]): void {
   if (request[fieldName] === undefined || request[fieldName] === null || request[fieldName] === '') return;
   const parsed = decimal(request[fieldName]);
@@ -88,6 +102,7 @@ export function evaluateOrderGate(operation: OrderOperation, config: TossInvestC
   else if (!symbol && operation !== 'cancel') failures.push('request.symbol is required for symbol policy checks');
 
   if (operation !== 'cancel') {
+    requireLimitOrder(operation, input.request, failures);
     requirePositiveDecimal('quantity', input.request, failures);
     requirePositiveDecimal('price', input.request, failures);
     requirePositiveDecimal('orderAmount', input.request, failures);
