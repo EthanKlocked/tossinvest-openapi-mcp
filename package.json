@@ -1,0 +1,28 @@
+{
+  "name": "tossinvest-openapi-mcp",
+  "version": "0.1.0",
+  "description": "Safe-by-default MCP server for the official Toss Securities Open API.",
+  "type": "module",
+  "bin": {
+    "tossinvest-mcp-server": "dist/index.js"
+  },
+  "files": ["dist", "README.md", "SECURITY.md", "CHANGELOG.md", ".env.example"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "npm run build && node dist/index.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "audit:prod": "npm audit --omit=dev"
+  },
+  "keywords": ["mcp", "toss", "tossinvest", "openapi", "trading"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.8.3"
+  },
+  "engines": { "node": ">=20" }
+}
