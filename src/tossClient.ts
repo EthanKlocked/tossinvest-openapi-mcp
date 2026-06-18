@@ -143,11 +143,14 @@ export class TossInvestClient {
 
 function isInvalidTokenResponse(response: Response, payload: unknown): boolean {
   if (response.status !== 401) return false;
-  if (typeof payload === 'string') return payload.includes('invalid-token');
-  if (typeof payload !== 'object' || payload === null) return false;
+  return containsInvalidToken(payload);
+}
 
-  const values = Object.values(payload as Record<string, unknown>);
-  return values.some((value) => typeof value === 'string' && value.toLowerCase() === 'invalid-token');
+function containsInvalidToken(value: unknown): boolean {
+  if (typeof value === 'string') return value.toLowerCase() === 'invalid-token';
+  if (Array.isArray(value)) return value.some((item) => containsInvalidToken(item));
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value as Record<string, unknown>).some((item) => containsInvalidToken(item));
 }
 
 async function parseResponse(response: Response): Promise<unknown> {

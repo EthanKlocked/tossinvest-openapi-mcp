@@ -38,7 +38,7 @@ test('adds X-Tossinvest-Account from per-call accountSeq or env and errors when 
   await assert.rejects(missing.get('/api/v1/holdings', { accountRequired: true }), /accountSeq/);
 });
 
-test('invalid-token API response refreshes token and retries the original request once', async () => {
+test('nested invalid-token API response refreshes token and retries the original request once', async () => {
   const calls = [];
   let tokenIssueCount = 0;
   const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input, init) => {
@@ -48,7 +48,7 @@ test('invalid-token API response refreshes token and retries the original reques
       return new Response(JSON.stringify({ access_token: `token-${tokenIssueCount}`, expires_in: 3600 }), { status: 200 });
     }
     if (String(init?.headers?.authorization) === 'Bearer token-1') {
-      return new Response(JSON.stringify({ code: 'invalid-token', message: 'expired by another client' }), { status: 401 });
+      return new Response(JSON.stringify({ error: { code: 'invalid-token', message: '유효하지 않은 토큰입니다.' } }), { status: 401 });
     }
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   });
