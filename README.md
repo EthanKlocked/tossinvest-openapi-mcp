@@ -11,6 +11,8 @@ This package is designed for developers who want read-only account, market, and 
 - Uses only the official Toss Open API server: `https://openapi.tossinvest.com`
 - Starts without credentials; `auth_status` reports missing configuration instead of crashing.
 - Keeps OAuth access tokens in memory only.
+- On `401 invalid-token` data API responses, discards the cached token, requests a fresh OAuth token, and retries the original request once.
+- `auth_status` separates token issuance from data endpoint reachability and reports whether a default `TOSS_ACCOUNT_SEQ` is configured.
 - Redacts API keys, secrets, bearer tokens, account headers, and account numbers from tool output/errors.
 - Trading is disabled by default.
 - Order tools default to `dryRun=true`.
@@ -118,11 +120,24 @@ Trading tools:
 - `order_modify` — defaults to dry-run; real execution requires all modify gates.
 - `order_cancel` — defaults to dry-run; real execution requires all cancel gates.
 
+## Auth status and account selection
+
+`auth_status` intentionally separates OAuth token issuance from actual data API reachability:
+
+- `configured`: required credential environment variables are present.
+- `tokenAvailable`: `POST /oauth2/token` succeeded.
+- `dataApiReachable`: a real read-only data check against `GET /api/v1/accounts` succeeded.
+- `authenticated`: `true` only when both token issuance and the data endpoint check succeed.
+- `accountSeqConfigured`: `true` when `TOSS_ACCOUNT_SEQ` is set.
+- `accountSeqRequiredForAccountTools`: `true`; account-scoped tools need either a per-call `accountSeq` or `TOSS_ACCOUNT_SEQ`.
+
+Most market-data tools such as `prices`, `orderbook`, `trades`, and `stock_info` do not require `accountSeq`. Account-scoped tools such as `holdings`, `orders_open`, `orders_closed`, `order_detail`, `buying_power`, `sellable_quantity`, `commissions`, and real/dry-run order tools require `accountSeq` via the tool arguments or `TOSS_ACCOUNT_SEQ`.
+
 ## Endpoint mapping
 
 | Tool | Method/path | Side effect |
 | --- | --- | --- |
-| `auth_status` | `POST /oauth2/token` only when credentials exist | Token check only |
+| `auth_status` | `POST /oauth2/token`; then `GET /api/v1/accounts` when token issuance succeeds | Token/data reachability check only |
 | `accounts` | `GET /api/v1/accounts` | Read-only |
 | `holdings` | `GET /api/v1/holdings` | Read-only |
 | `prices` | `GET /api/v1/prices` | Read-only |

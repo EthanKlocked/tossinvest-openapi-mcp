@@ -37,3 +37,65 @@ test('adds X-Tossinvest-Account from per-call accountSeq or env and errors when 
   const missing = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async () => new Response('{}'));
   await assert.rejects(missing.get('/api/v1/holdings', { accountRequired: true }), /accountSeq/);
 });
+
+test('invalid-token API response refreshes token and retries the original request once', async () => {
+  const calls = [];
+  let tokenIssueCount = 0;
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input, init) => {
+    calls.push({ input: String(input), init });
+    if (String(input).endsWith('/oauth2/token')) {
+      tokenIssueCount += 1;
+      return new Response(JSON.stringify({ access_token: `token-${tokenIssueCount}`, expires_in: 3600 }), { status: 200 });
+    }
+    if (String(init?.headers?.authorization) === 'Bearer token-1') {
+      return new Response(JSON.stringify({ code: 'invalid-token', message: 'expired by another client' }), { status: 401 });
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+
+  assert.deepEqual(await client.get('/api/v1/prices', { query: { symbol: 'AAPL' } }), { ok: true });
+  assert.deepEqual(calls.map((call) => call.input), [
+    'https://openapi.tossinvest.com/oauth2/token',
+    'https://openapi.tossinvest.com/api/v1/prices?symbol=AAPL',
+    'https://openapi.tossinvest.com/oauth2/token',
+    'https://openapi.tossinvest.com/api/v1/prices?symbol=AAPL'
+  ]);
+  assert.equal(calls[1].init.headers.authorization, 'Bearer token-1');
+  assert.equal(calls[3].init.headers.authorization, 'Bearer token-2');
+});
+
+test('invalid-token retry happens only once before returning the API error', async () => {
+  const calls = [];
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input, init) => {
+    calls.push({ input: String(input), init });
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: `token-${calls.length}`, expires_in: 3600 }), { status: 200 });
+    return new Response(JSON.stringify({ code: 'invalid-token' }), { status: 401 });
+  });
+
+  await assert.rejects(client.get('/api/v1/prices'), /invalid-token/);
+  assert.equal(calls.filter((call) => call.input.endsWith('/oauth2/token')).length, 2);
+  assert.equal(calls.filter((call) => call.input.endsWith('/api/v1/prices')).length, 2);
+});
+
+test('auth status separates token issuance from data endpoint reachability and accountSeq configuration', async () => {
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input) => {
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).endsWith('/api/v1/accounts')) return new Response(JSON.stringify({ code: 'invalid-token' }), { status: 401 });
+    return new Response('{}', { status: 404 });
+  });
+
+  assert.deepEqual(await client.authStatus(), {
+    configured: true,
+    tokenAvailable: true,
+    dataApiReachable: false,
+    authenticated: false,
+    tokenCache: 'memory',
+    accountSeqConfigured: false,
+    accountSeqRequiredForAccountTools: true,
+    dataApiCheck: {
+      endpoint: '/api/v1/accounts',
+      ok: false,
+      error: 'Toss API GET /api/v1/accounts failed (401): {"code":"invalid-token"}'
+    }
+  });
+});
