@@ -24,11 +24,45 @@ export class TossInvestClient {
     if (!this.config.hasCredentials) {
       return { configured: false, authenticated: false, reason: 'Missing TOSS_API_KEY or TOSS_SECRET_KEY' };
     }
+
+    const baseStatus = {
+      configured: true,
+      tokenCache: this.tokenCache ? 'memory' : 'none',
+      accountSeqConfigured: this.config.accountSeq !== undefined,
+      accountSeqRequiredForAccountTools: true
+    };
+
     try {
       await this.getToken();
-      return { configured: true, authenticated: true, tokenCache: this.tokenCache ? 'memory' : 'none' };
     } catch (error) {
-      return { configured: true, authenticated: false, error: sanitizeError(error).message };
+      return {
+        ...baseStatus,
+        tokenAvailable: false,
+        dataApiReachable: false,
+        authenticated: false,
+        error: sanitizeError(error).message
+      };
+    }
+
+    try {
+      await this.request('GET', '/api/v1/accounts', {});
+      return {
+        ...baseStatus,
+        tokenAvailable: true,
+        dataApiReachable: true,
+        authenticated: true,
+        tokenCache: this.tokenCache ? 'memory' : 'none',
+        dataApiCheck: { endpoint: '/api/v1/accounts', ok: true }
+      };
+    } catch (error) {
+      return {
+        ...baseStatus,
+        tokenAvailable: true,
+        dataApiReachable: false,
+        authenticated: false,
+        tokenCache: this.tokenCache ? 'memory' : 'none',
+        dataApiCheck: { endpoint: '/api/v1/accounts', ok: false, error: sanitizeError(error).message }
+      };
     }
   }
 
@@ -72,21 +106,31 @@ export class TossInvestClient {
       throw new Error('accountSeq is required. Pass accountSeq per call or set TOSS_ACCOUNT_SEQ.');
     }
 
-    const token = await this.getToken();
     const url = new URL(path, this.config.baseUrl);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value));
     }
-    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
-    if (options.accountRequired) {
-      headers['X-Tossinvest-Account'] = String(selectedAccount);
+
+    const execute = async (token: string): Promise<{ response: Response; payload: unknown }> => {
+      const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+      if (options.accountRequired) {
+        headers['X-Tossinvest-Account'] = String(selectedAccount);
+      }
+      const response = await this.fetcher(url.toString(), {
+        method,
+        headers: options.body === undefined ? headers : { ...headers, 'content-type': 'application/json' },
+        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      });
+      const payload = await parseResponse(response);
+      return { response, payload };
+    };
+
+    let { response, payload } = await execute(await this.getToken());
+    if (isInvalidTokenResponse(response, payload)) {
+      this.tokenCache = undefined;
+      ({ response, payload } = await execute(await this.getToken()));
     }
-    const response = await this.fetcher(url.toString(), {
-      method,
-      headers: options.body === undefined ? headers : { ...headers, 'content-type': 'application/json' },
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
-    });
-    const payload = await parseResponse(response);
+
     if (!response.ok) throw new Error(`Toss API ${method} ${path} failed (${response.status}): ${JSON.stringify(redactSensitive(payload))}`);
     if (path === '/api/v1/accounts' && Array.isArray(payload)) {
       return payload.map((account) => typeof account === 'object' && account !== null
@@ -95,6 +139,18 @@ export class TossInvestClient {
     }
     return redactSensitive(payload);
   }
+}
+
+function isInvalidTokenResponse(response: Response, payload: unknown): boolean {
+  if (response.status !== 401) return false;
+  return containsInvalidToken(payload);
+}
+
+function containsInvalidToken(value: unknown): boolean {
+  if (typeof value === 'string') return value.toLowerCase() === 'invalid-token';
+  if (Array.isArray(value)) return value.some((item) => containsInvalidToken(item));
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value as Record<string, unknown>).some((item) => containsInvalidToken(item));
 }
 
 async function parseResponse(response: Response): Promise<unknown> {
