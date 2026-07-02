@@ -15,7 +15,9 @@ export interface TossInvestConfig {
   allowedSymbols: string[];
   blockedSymbols: string[];
   baseUrl: string;
+  requestTimeoutMs: number;
 }
+
 
 const DEFAULT_BASE_URL = 'https://openapi.tossinvest.com';
 
@@ -56,6 +58,7 @@ export function loadConfig(env: Env = process.env): TossInvestConfig {
     maxOrderUsd: parseNumber(env.MAX_ORDER_USD, 0),
     allowedSymbols: parseSymbolList(env.ALLOWED_SYMBOLS),
     blockedSymbols: parseSymbolList(env.BLOCKED_SYMBOLS),
-    baseUrl: DEFAULT_BASE_URL
+    baseUrl: DEFAULT_BASE_URL,
+    requestTimeoutMs: parseNumber(env.TOSS_REQUEST_TIMEOUT_MS, 15_000)
   };
 }

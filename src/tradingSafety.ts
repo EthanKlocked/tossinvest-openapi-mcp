@@ -100,6 +100,9 @@ export function evaluateOrderGate(operation: OrderOperation, config: TossInvestC
   if (symbol && config.blockedSymbols.includes(symbol)) failures.push(`symbol ${symbol} is blocked by BLOCKED_SYMBOLS`);
   else if (symbol && config.allowedSymbols.length > 0 && !config.allowedSymbols.includes(symbol)) failures.push(`symbol ${symbol} is not included in ALLOWED_SYMBOLS`);
   else if (!symbol && operation !== 'cancel') failures.push('request.symbol is required for symbol policy checks');
+  else if (!symbol && operation === 'cancel' && (config.allowedSymbols.length > 0 || config.blockedSymbols.length > 0)) {
+    failures.push('request.symbol is required for real order cancellation when ALLOWED_SYMBOLS or BLOCKED_SYMBOLS is configured');
+  }
 
   if (operation !== 'cancel') {
     requireLimitOrder(operation, input.request, failures);

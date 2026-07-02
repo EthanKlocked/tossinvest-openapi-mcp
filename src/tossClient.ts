@@ -86,7 +86,7 @@ export class TossInvestClient {
       client_id: this.config.apiKey,
       client_secret: this.config.secretKey
     });
-    const response = await this.fetcher(`${this.config.baseUrl}/oauth2/token`, {
+    const response = await this.fetchWithTimeout(`${this.config.baseUrl}/oauth2/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body
@@ -98,6 +98,22 @@ export class TossInvestClient {
     const expiresIn = Number((payload as Record<string, unknown>).expires_in ?? 3600);
     this.tokenCache = { token: accessToken, expiresAt: now + Math.max(60, expiresIn) * 1000 };
     return accessToken;
+  }
+
+  private async fetchWithTimeout(input: string | URL, init: RequestInit): Promise<Response> {
+    const timeoutMs = this.config.requestTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return this.fetcher(input, init);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await this.fetcher(input, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error(`Toss API request timed out after ${timeoutMs}ms`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async request(method: 'GET' | 'POST', path: string, options: RequestOptions): Promise<unknown> {
@@ -116,7 +132,7 @@ export class TossInvestClient {
       if (options.accountRequired) {
         headers['X-Tossinvest-Account'] = String(selectedAccount);
       }
-      const response = await this.fetcher(url.toString(), {
+      const response = await this.fetchWithTimeout(url.toString(), {
         method,
         headers: options.body === undefined ? headers : { ...headers, 'content-type': 'application/json' },
         body: options.body === undefined ? undefined : JSON.stringify(options.body)

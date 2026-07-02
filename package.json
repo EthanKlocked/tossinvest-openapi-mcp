@@ -6,15 +6,29 @@
   "bin": {
     "tossinvest-mcp-server": "dist/index.js"
   },
-  "files": ["dist", "README.md", "SECURITY.md", "CHANGELOG.md", ".env.example"],
+  "files": [
+    "dist",
+    "scripts/smoke-readonly.mjs",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "dev": "npm run build && node dist/index.js",
     "test": "npm run build && node --test tests/*.test.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "audit:prod": "npm audit --omit=dev"
+    "audit:prod": "npm audit --omit=dev",
+    "smoke:readonly": "npm run build && node scripts/smoke-readonly.mjs"
   },
-  "keywords": ["mcp", "model-context-protocol", "toss", "tossinvest", "openapi", "typescript"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "toss",
+    "tossinvest",
+    "openapi",
+    "typescript"
+  ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",
@@ -24,5 +38,19 @@
     "@types/node": "^20.14.10",
     "typescript": "^5.8.3"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EthanKlocked/tossinvest-openapi-mcp.git"
+  },
+  "homepage": "https://github.com/EthanKlocked/tossinvest-openapi-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/EthanKlocked/tossinvest-openapi-mcp/issues"
+  },
+  "author": "Ethan Klocked",
+  "publishConfig": {
+    "access": "public"
+  }
 }

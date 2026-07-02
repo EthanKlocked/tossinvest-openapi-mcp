@@ -83,6 +83,7 @@ If this project is later published to npm, use a package name owned by the maint
 | `MAX_ORDER_USD` | `0` | Maximum allowed calculated USD order amount. |
 | `ALLOWED_SYMBOLS` | unset | Optional comma-separated allow list. |
 | `BLOCKED_SYMBOLS` | unset | Optional comma-separated block list; always wins over allow list. |
+| `TOSS_REQUEST_TIMEOUT_MS` | `15000` | Timeout for OAuth, read-only, and order requests. Set `0` only for local debugging to disable the timeout. |
 
 Confirmation text for real order operations:
 
@@ -118,7 +119,7 @@ Trading tools:
 - `order_validate` — checks local gates only and never calls Toss order POST endpoints.
 - `order_create` — defaults to dry-run; real execution requires all create gates.
 - `order_modify` — defaults to dry-run; real execution requires all modify gates.
-- `order_cancel` — defaults to dry-run; real execution requires all cancel gates.
+- `order_cancel` — defaults to dry-run; real execution requires all cancel gates. When `ALLOWED_SYMBOLS` or `BLOCKED_SYMBOLS` is configured, real cancellation also requires caller-supplied `request.symbol` so local symbol policy can be evaluated before the POST. The server does not fetch order details before cancel because this would add a second API dependency and the official detail payload shape should be confirmed by users with live credentials before relying on it for safety.
 
 ## Auth status and account selection
 
@@ -222,6 +223,30 @@ npm run audit:prod
 ```
 
 The required test suite uses Node's built-in test runner and mocked fetch calls. It does not require real Toss credentials and does not call live order endpoints.
+
+### Opt-in read-only integration smoke test
+
+After configuring your own Toss credentials locally, you can run a safe read-only smoke test:
+
+```bash
+TOSS_API_KEY=... TOSS_SECRET_KEY=... npm run smoke:readonly
+```
+
+Optional account-scoped checks can use `TOSS_ACCOUNT_SEQ`, but the default smoke path only calls read-only tools that do not create, modify, or cancel orders: `auth_status`, `accounts`, and `market_calendar`. If `TOSS_API_KEY` or `TOSS_SECRET_KEY` is missing, the command exits successfully with a `SKIP` message and makes no Toss API request. Output is passed through the same redaction helpers used by the MCP server.
+
+### Timeout/retry policy
+
+This server applies a configurable request timeout to OAuth, read-only calls, and order calls. It intentionally does not add broad automatic retries: read-only retry policy should be based on observed Toss API behavior, and order POST retries are disabled unless official idempotency guarantees are documented. The only automatic retry remains the existing one-time token refresh/retry for a `401 invalid-token` response.
+
+## Release checklist
+
+Before publishing or tagging a release:
+
+1. Verify package ownership and name availability; do not publish the unscoped `tossinvest-openapi-mcp` name.
+2. Run `npm test`, `npm run lint`, `npm run audit:prod`, and `npm pack --dry-run`.
+3. Confirm the dry-run tarball includes only runtime files (`dist/` JavaScript/declarations without source maps), `scripts/smoke-readonly.mjs`, `README.md`, `LICENSE`, `.env.example`, and package metadata.
+4. Re-scan docs for secrets, account numbers, local paths, private workflow notes, or investment advice/automation claims.
+5. Publish only after explicit maintainer approval.
 
 ## Publication hygiene
 
