@@ -99,3 +99,16 @@ test('auth status separates token issuance from data endpoint reachability and a
     }
   });
 });
+
+
+test('passes an AbortSignal to Toss requests for configured timeout support', async () => {
+  const calls = [];
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret', TOSS_REQUEST_TIMEOUT_MS: '1000' }), async (input, init) => {
+    calls.push({ input: String(input), init });
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  });
+  await client.get('/api/v1/prices', { query: { symbols: 'AAPL' } });
+  assert.ok(calls[0].init.signal instanceof AbortSignal);
+  assert.ok(calls[1].init.signal instanceof AbortSignal);
+});

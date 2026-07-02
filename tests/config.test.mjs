@@ -37,3 +37,10 @@ test('loadConfig parses booleans, limits, account sequence, and symbol policies'
   assert.deepEqual(config.allowedSymbols, ['005930', 'AAPL']);
   assert.deepEqual(config.blockedSymbols, ['TSLA']);
 });
+
+
+test('loadConfig parses configurable request timeout with safe default', () => {
+  assert.equal(loadConfig({}).requestTimeoutMs, 15000);
+  assert.equal(loadConfig({ TOSS_REQUEST_TIMEOUT_MS: '2500' }).requestTimeoutMs, 2500);
+  assert.equal(loadConfig({ TOSS_REQUEST_TIMEOUT_MS: '-1' }).requestTimeoutMs, 15000);
+});

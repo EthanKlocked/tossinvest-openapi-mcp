@@ -51,3 +51,14 @@ test('modify and cancel require their operation gates and confirmation', () => {
   const cancel = evaluateOrderGate('cancel', loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CANCEL: 'true' }), { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { symbol: 'AAPL' } });
   assert.equal(cancel.shouldExecute, true);
 });
+
+
+test('real cancel requires caller-supplied symbol when symbol policy is configured', () => {
+  const config = loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CANCEL: 'true', ALLOWED_SYMBOLS: 'AAPL' });
+  const missingSymbol = evaluateOrderGate('cancel', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: {} });
+  assert.equal(missingSymbol.shouldExecute, false);
+  assert.match(missingSymbol.failures.join(' '), /request\.symbol is required/);
+
+  const allowedSymbol = evaluateOrderGate('cancel', config, { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { symbol: 'AAPL' } });
+  assert.equal(allowedSymbol.shouldExecute, true);
+});
