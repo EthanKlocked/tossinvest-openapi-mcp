@@ -10,6 +10,18 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Major upgrades for core runtime/type/validation packages should be
+      # handled as explicit migration work with local test evidence.
+      - dependency-name: zod
+        update-types:
+          - version-update:semver-major
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
