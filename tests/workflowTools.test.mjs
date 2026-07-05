@@ -59,6 +59,30 @@ test('pre_trade_check is separate from execution and returns blockers, missing, 
   assert.deepEqual(result.dataFreshness.source, 'fresh_reads');
 });
 
+test('pre_trade_check parses official-style buying power aliases, market session fields, and commission estimate', async () => {
+  const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input) => {
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ session: 'REGULAR', sessionStatus: 'OPEN' }), { status: 200 });
+    if (String(input).includes('/api/v1/stocks/005930/warnings')) return new Response(JSON.stringify({ warnings: [] }), { status: 200 });
+    if (String(input).includes('/api/v1/price-limits')) return new Response(JSON.stringify({ upperLimit: 80000, lowerLimit: 60000 }), { status: 200 });
+    if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ currency: 'KRW', cashBuyingPower: 200000 }), { status: 200 });
+    if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify([]), { status: 200 });
+    if (String(input).includes('/api/v1/commissions')) return new Response(JSON.stringify({ commissionRate: 0.0015 }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const result = await executeTool('pre_trade_check', {
+    request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '70000', currency: 'KRW' }
+  }, deps);
+
+  assert.equal(result.canProceedDryRun, true);
+  assert.ok(result.checks.some((item) => item.code === 'market_open' && item.session === 'REGULAR'));
+  assert.ok(result.checks.some((item) => item.code === 'buying_power_sufficient' && item.available === 200000));
+  assert.ok(!result.missing.some((item) => item.code === 'buying_power_not_calculable'));
+  const commission = result.checks.find((item) => item.code === 'commission_estimated');
+  assert.equal(commission.estimatedFee, 105);
+});
+
 test('order_preview never calls Toss order POST and returns preview contract fields', async () => {
   clearPreviewStoreForTests();
   const calls = [];
