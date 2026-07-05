@@ -1,6 +1,6 @@
 {
   "name": "@ethanklocked/tossinvest-openapi-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Safe-by-default MCP server for the official Toss Securities Open API.",
   "type": "module",
   "bin": {

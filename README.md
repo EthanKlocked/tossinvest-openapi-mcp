@@ -185,6 +185,14 @@ Recommended safety-first flow:
 portfolio_snapshot → pre_trade_check → order_preview → user/delegated approval → order_execute → order_status_summary
 ```
 
+Market calendar checks are routed by request market:
+
+- `currency=KRW` or a six-digit Korean stock symbol uses `market_calendar(KR)`.
+- US tickers / `currency=USD` use `market_calendar(US)`.
+- US non-business days are detected from the official calendar shape when `result.today.dayMarket`, `preMarket`, `regularMarket`, and `afterMarket` are all `null`.
+- KR non-business days are detected when `result.today.integrated` is `null`.
+- In those cases `pre_trade_check` and `order_preview` return a `market_closed_non_business_day` blocker with `market`, `date`, and `nextBusinessDay`; they do not report `market_open_unknown` in `missing`.
+
 `portfolio_snapshot` example:
 
 ```json
