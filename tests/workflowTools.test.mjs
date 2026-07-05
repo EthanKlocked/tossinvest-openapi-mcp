@@ -33,6 +33,49 @@ test('portfolio_snapshot returns structured partial results and warning flags', 
   assert.equal(calls.some((call) => call.method === 'POST' && !call.input.endsWith('/oauth2/token')), false);
 });
 
+test('portfolio_snapshot unfolds official holdings result.items payload', async () => {
+  const deps = makeDeps({}, async (input) => {
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('/api/v1/holdings')) return new Response(JSON.stringify({
+      result: {
+        totalPurchaseAmount: { krw: '9385877', usd: '63973.65555' },
+        items: [
+          { symbol: '058470', name: '리노공업', quantity: '14', marketValue: { amount: '1101800' } },
+          { symbol: '005930', name: '삼성전자', quantity: '4', marketValue: { amount: '1258000' } }
+        ]
+      }
+    }), { status: 200 });
+    if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1 }, deps);
+  assert.equal(snapshot.holdings.count, 2);
+  assert.equal(snapshot.holdings.items[0].symbol, '058470');
+  assert.equal(snapshot.holdings.items[0].quantity, 14);
+  assert.ok(!snapshot.warningFlags.includes('holdings_empty_or_unavailable'));
+  assert.equal(snapshot.positionWeights.status, 'calculated');
+});
+
+test('order_status_summary unfolds official closed orders result.orders payload', async () => {
+  const deps = makeDeps({}, async (input) => {
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('status=OPEN')) return new Response(JSON.stringify({ result: { orders: [] } }), { status: 200 });
+    if (String(input).includes('status=CLOSED')) return new Response(JSON.stringify({ result: { orders: [
+      { orderId: 'filled', status: 'FILLED', symbol: '005930' },
+      { orderId: 'canceled', status: 'CANCELED', symbol: 'AAPL' }
+    ], nextCursor: 'cursor-2', hasNext: true } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const summary = await executeTool('order_status_summary', { accountSeq: 1, limit: 20 }, deps);
+  assert.equal(summary.openOrders.items.length, 0);
+  assert.equal(summary.recentlyClosedOrders.items.length, 2);
+  assert.equal(summary.stateCounts.FILLED, 1);
+  assert.equal(summary.stateCounts.CANCELED, 1);
+});
+
 test('pre_trade_check is separate from execution and returns blockers, missing, warnings, and dry-run status', async () => {
   const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input, init) => {
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });

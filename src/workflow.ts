@@ -55,15 +55,22 @@ function asRecord(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {};
 }
 
-function asArray(value: unknown): unknown[] {
+function asArray(value: unknown, depth = 0): unknown[] {
   if (Array.isArray(value)) return value;
-  if (value && typeof value === 'object') {
-    const record = value as JsonRecord;
-    for (const key of ['items', 'orders', 'holdings', 'data', 'result', 'contents']) {
-      if (Array.isArray(record[key])) return record[key] as unknown[];
+  if (depth > 8 || !value || typeof value !== 'object') return [];
+  const record = value as JsonRecord;
+  let emptyArrayFallback: unknown[] | undefined;
+  for (const key of ['items', 'orders', 'holdings', 'contents', 'result', 'data', 'payload', 'body']) {
+    const nested = record[key];
+    if (Array.isArray(nested)) {
+      if (nested.length > 0) return nested;
+      emptyArrayFallback ??= nested;
+      continue;
     }
+    const nestedItems = asArray(nested, depth + 1);
+    if (nestedItems.length > 0) return nestedItems;
   }
-  return [];
+  return emptyArrayFallback ?? [];
 }
 
 function text(value: unknown): string | undefined {
@@ -90,7 +97,7 @@ function quantityOf(value: unknown): number | undefined {
   return numberValue(record.quantity ?? record.qty ?? record.orderQuantity ?? record.sellableQuantity);
 }
 
-function amountOf(value: unknown): number | undefined {
+function amountOf(value: unknown, depth = 0): number | undefined {
   const record = asRecord(value);
   const direct = numberValue(
     record.amount
@@ -108,10 +115,11 @@ function amountOf(value: unknown): number | undefined {
     ?? record.marketValue
   );
   if (direct !== undefined) return direct;
-  for (const key of ['result', 'data', 'payload', 'body']) {
+  if (depth > 8) return undefined;
+  for (const key of ['amount', 'amountAfterCost', 'marketValue', 'result', 'data', 'payload', 'body']) {
     const nested = asRecord(record[key]);
     if (Object.keys(nested).length > 0) {
-      const nestedAmount = amountOf(nested);
+      const nestedAmount = amountOf(nested, depth + 1);
       if (nestedAmount !== undefined) return nestedAmount;
     }
   }
