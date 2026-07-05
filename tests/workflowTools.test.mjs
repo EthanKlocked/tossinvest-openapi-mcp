@@ -86,7 +86,7 @@ test('pre_trade_check parses official-style buying power aliases, market session
 test('pre_trade_check treats null today market session as non-business-day blocker', async () => {
   const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input) => {
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
-    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ today: { session: null }, result: { cashBuyingPower: 200000 } }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ result: { today: { session: null } } }), { status: 200 });
     if (String(input).includes('/api/v1/stocks/005930/warnings')) return new Response(JSON.stringify({ warnings: [] }), { status: 200 });
     if (String(input).includes('/api/v1/price-limits')) return new Response(JSON.stringify({ upperLimit: 80000, lowerLimit: 60000 }), { status: 200 });
     if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 200000 } }), { status: 200 });
@@ -100,7 +100,7 @@ test('pre_trade_check treats null today market session as non-business-day block
   }, deps);
 
   assert.equal(result.canProceedDryRun, false);
-  assert.ok(result.blockers.some((item) => item.code === 'non_business_day'));
+  assert.ok(result.blockers.some((item) => item.code === 'market_closed_non_business_day'));
   assert.ok(!result.missing.some((item) => item.code === 'market_open_unknown'));
   assert.ok(result.checks.some((item) => item.code === 'buying_power_sufficient' && item.available === 200000));
 });
