@@ -15,6 +15,9 @@ This package is designed for developers who want read-only account, market, and 
 - `auth_status` separates token issuance from data endpoint reachability and reports whether a default `TOSS_ACCOUNT_SEQ` is configured.
 - Redacts API keys, secrets, bearer tokens, account headers, and account numbers from tool output/errors.
 - Trading is disabled by default.
+- v0.2 workflow tools are safety-first and preview-based: `portfolio_snapshot → pre_trade_check → order_preview → approval → order_execute → order_status_summary`.
+- `order_preview` stores preview contracts in memory only and never calls Toss order POST endpoints.
+- `order_execute` is intentionally fast: it rechecks only preview/confirmation/hash/env/delegated-authority gates, submits at most one order POST, and reports timeout/network ambiguity as `unknown_execution_state` for reconciliation before any manual retry.
 - Order tools default to `dryRun=true`.
 - Real create/modify/cancel operations require `ENABLE_TRADING=true` plus the operation-specific gate.
 - Confirmation is required by default.
@@ -114,6 +117,14 @@ Read-only tools:
 - `sellable_quantity`
 - `commissions`
 
+Workflow tools:
+
+- `portfolio_snapshot` — reads holdings, KRW/USD buying power, open orders, calculable position weights, account/accountSeq state, warning flags, and partial failures.
+- `pre_trade_check` — separate read/check layer for candidate orders; returns `canProceedDryRun`, `realOrderBlockedByDefault`, `checks`, `warnings`, `blockers`, `missing`, `estimate`, and `dataFreshness`.
+- `order_preview` — creates an in-memory preview contract; returns `previewId`, `requestHash`, `ttlSeconds`, `expiresAt`, exact `confirmationText`, estimated amount/fee/cash/quantity checks, gate status, risk flags, and calculability notes. It never calls order POST endpoints. Default TTL: 90 seconds; max accepted TTL: 300 seconds.
+- `order_execute` — fast preview-based submission; requires `previewId`, matching `requestHash`, exact confirmation (`I approve this exact Toss order preview`), unexpired preview, env gates, and optional delegated-authority bounds. It does not run `pre_trade_check` in the hot path and does not add automatic order POST retry.
+- `order_status_summary` — read-only reconciliation summary for open/recently closed orders, state counts, filled/partial/canceled/rejected/replace-related states when present, and caveats for disappeared/replaced orders.
+
 Trading tools:
 
 - `order_validate` — checks local gates only and never calls Toss order POST endpoints.
@@ -156,10 +167,92 @@ Most market-data tools such as `prices`, `orderbook`, `trades`, and `stock_info`
 | `buying_power` | `GET /api/v1/buying-power` | Read-only |
 | `sellable_quantity` | `GET /api/v1/sellable-quantity` | Read-only |
 | `commissions` | `GET /api/v1/commissions` | Read-only |
+| `portfolio_snapshot` | Composes `GET /api/v1/holdings`, `GET /api/v1/buying-power`, and `GET /api/v1/orders?status=OPEN` | Read-only workflow snapshot |
+| `pre_trade_check` | Composes market calendar, warnings, price limits, buying power/sellable quantity, commissions, and open orders | Read/check only; no order POST |
+| `order_preview` | Local preview contract plus read/check calls | No Toss order POST; memory-only preview storage |
+| `order_execute` | `POST /api/v1/orders` only after preview/confirmation/hash/env gates pass | At most one order POST; no automatic order POST retry |
+| `order_status_summary` | `GET /api/v1/orders?status=OPEN` and `GET /api/v1/orders?status=CLOSED` | Read-only reconciliation |
 | `order_validate` | Local gate evaluation only | No Toss order POST |
 | `order_create` | `POST /api/v1/orders` | Real order only after all gates pass |
 | `order_modify` | `POST /api/v1/orders/{orderId}/modify` | Real order modification only after all gates pass |
 | `order_cancel` | `POST /api/v1/orders/{orderId}/cancel` | Real order cancellation only after all gates pass |
+
+## v0.2 workflow examples
+
+Recommended safety-first flow:
+
+```text
+portfolio_snapshot → pre_trade_check → order_preview → user/delegated approval → order_execute → order_status_summary
+```
+
+`portfolio_snapshot` example:
+
+```json
+{
+  "accountSeq": 1,
+  "currencies": ["KRW", "USD"],
+  "limit": 50
+}
+```
+
+`pre_trade_check` example. This is a separate read/check tool and is intentionally not forced into `order_execute`'s hot path:
+
+```json
+{
+  "accountSeq": 1,
+  "request": {
+    "symbol": "005930",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "quantity": "1",
+    "price": "70000",
+    "currency": "KRW"
+  },
+  "delegatedAuthority": {
+    "remainingAmount": 100000,
+    "expiresAt": "2026-07-05T15:00:00.000Z"
+  }
+}
+```
+
+`order_preview` example. It never calls Toss order POST endpoints and returns `previewId`, `requestHash`, TTL, and exact confirmation text:
+
+```json
+{
+  "accountSeq": 1,
+  "ttlSeconds": 90,
+  "request": {
+    "symbol": "005930",
+    "side": "BUY",
+    "orderType": "LIMIT",
+    "quantity": "1",
+    "price": "70000",
+    "currency": "KRW"
+  }
+}
+```
+
+`order_execute` example. Copy the `previewId`, `requestHash`, and exact `confirmationText` from the preview response:
+
+```json
+{
+  "previewId": "preview_...",
+  "requestHash": "<sha256-from-preview>",
+  "confirmation": "I approve this exact Toss order preview"
+}
+```
+
+If an order POST times out or returns an ambiguous network failure, `order_execute` returns `status: "unknown_execution_state"` and directs callers to reconcile with `order_status_summary`/`order_detail` before any manual retry. The server does not automatically retry order POSTs.
+
+`order_status_summary` example:
+
+```json
+{
+  "accountSeq": 1,
+  "symbol": "005930",
+  "limit": 50
+}
+```
 
 ## Trading safety examples
 
