@@ -148,7 +148,15 @@ function statusOf(order: unknown): string {
 }
 
 function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string; nonBusinessDay?: boolean } {
-  const record = asRecord(payload);
+  const original = asRecord(payload);
+  let record = original;
+  for (const key of ['result', 'data', 'payload', 'body']) {
+    const nested = asRecord(record[key]);
+    if (Object.keys(nested).length > 0 && (nested.today !== undefined || nested.session !== undefined || nested.sessionStatus !== undefined || nested.marketStatus !== undefined)) {
+      record = nested;
+      break;
+    }
+  }
   const today = asRecord(record.today);
   const source = Object.keys(today).length > 0 ? today : record;
   const sessionValue = Object.prototype.hasOwnProperty.call(source, 'session')
@@ -305,7 +313,7 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
     if (market.ok) {
       const state = marketOpenState(market.data);
       if (state.open === false) {
-        const code = state.nonBusinessDay ? 'non_business_day' : 'market_closed';
+        const code = state.nonBusinessDay ? 'market_closed_non_business_day' : 'market_closed';
         const message = state.nonBusinessDay ? 'Official market calendar indicates today has no trading session.' : 'Official market calendar indicates the market is closed.';
         blockers.push(check(code, 'blocker', message, { session: state.session, rawStatus: state.rawStatus }));
       }
