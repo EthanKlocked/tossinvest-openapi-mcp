@@ -17,6 +17,10 @@ interface PreviewContract {
   accountSeq?: number;
   createdAt: string;
   expiresAt: string;
+  executable: boolean;
+  previewGateStatus: 'pass' | 'blocked';
+  previewBlockers: JsonRecord[];
+  previewMissing: JsonRecord[];
   delegatedAuthority?: JsonRecord;
 }
 
@@ -347,10 +351,24 @@ export async function orderPreview(args: JsonRecord, deps: ToolDeps) {
   const createdAt = Date.now();
   const previewId = `preview_${compactId()}`;
   const expiresAt = new Date(createdAt + ttlSeconds * 1000).toISOString();
-  previewStore.set(previewId, { previewId, requestHash: hash, request, accountSeq: numberValue(args.accountSeq), createdAt: new Date(createdAt).toISOString(), expiresAt, delegatedAuthority: Object.keys(asRecord(args.delegatedAuthority)).length ? asRecord(args.delegatedAuthority) : undefined });
+  const executable = evaluation.blockers.length === 0 && evaluation.missing.length === 0;
+  previewStore.set(previewId, {
+    previewId,
+    requestHash: hash,
+    request,
+    accountSeq: numberValue(args.accountSeq),
+    createdAt: new Date(createdAt).toISOString(),
+    expiresAt,
+    executable,
+    previewGateStatus: executable ? 'pass' : 'blocked',
+    previewBlockers: evaluation.blockers,
+    previewMissing: evaluation.missing,
+    delegatedAuthority: Object.keys(asRecord(args.delegatedAuthority)).length ? asRecord(args.delegatedAuthority) : undefined
+  });
   return {
     previewId,
     requestHash: hash,
+    executable,
     ttlSeconds,
     expiresAt,
     confirmationText: WORKFLOW_CONFIRMATION_TEXT,
@@ -379,6 +397,11 @@ export async function orderExecute(args: JsonRecord, deps: ToolDeps) {
   if (preview && args.requestHash !== preview.requestHash) failures.push('requestHash does not match the stored preview request');
   if (args.confirmation !== WORKFLOW_CONFIRMATION_TEXT) failures.push(`confirmation must exactly match: ${WORKFLOW_CONFIRMATION_TEXT}`);
   if (preview) {
+    if (!preview.executable || preview.previewGateStatus !== 'pass') {
+      failures.push('preview gate did not pass at order_preview time; create a new executable order_preview after resolving blockers');
+      for (const blocker of preview.previewBlockers) failures.push(`preview blocker: ${String(blocker.code ?? blocker.message ?? 'unknown')}`);
+      for (const missing of preview.previewMissing) failures.push(`preview missing: ${String(missing.code ?? missing.message ?? 'unknown')}`);
+    }
     const gate = evaluateOrderGate('create', deps.config, { dryRun: false, confirmation: undefined, request: preview.request });
     for (const failure of gate.failures) {
       if (/confirmation/.test(failure)) continue;

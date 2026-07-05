@@ -79,6 +79,29 @@ test('order_preview never calls Toss order POST and returns preview contract fie
   assert.equal(calls.some((call) => call.method === 'POST' && !call.input.endsWith('/oauth2/token')), false);
 });
 
+test('order_execute rejects preview that was blocked at preview time before order POST', async () => {
+  clearPreviewStoreForTests();
+  const calls = [];
+  const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input, init) => {
+    calls.push({ input: String(input), method: init?.method });
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ isOpen: false }), { status: 200 });
+    if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ amount: 200000 }), { status: 200 });
+    if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify([]), { status: 200 });
+    if (String(input).endsWith('/api/v1/orders')) return new Response(JSON.stringify({ orderId: 'should-not-post' }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const preview = await executeTool('order_preview', { request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '70000', currency: 'KRW' } }, deps);
+  assert.equal(preview.gate.status, 'blocked');
+  assert.ok(preview.executable === false || preview.executable === undefined);
+
+  const result = await executeTool('order_execute', { previewId: preview.previewId, confirmation: WORKFLOW_CONFIRMATION_TEXT, requestHash: preview.requestHash }, deps);
+  assert.equal(result.status, 'blocked');
+  assert.match(result.failures.join(' '), /preview gate/i);
+  assert.equal(calls.filter((call) => call.input.endsWith('/api/v1/orders') && call.method === 'POST').length, 0);
+});
+
 test('order_execute rejects missing, confirmation mismatch, hash mismatch, expired preview, and failed env gates before order POST', async () => {
   clearPreviewStoreForTests();
   const orderPostCalls = [];
@@ -115,6 +138,7 @@ test('order_execute posts exactly once for an approved preview and reports ambig
   const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input, init) => {
     calls.push({ input: String(input), method: init?.method });
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ isOpen: true }), { status: 200 });
     if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ amount: 200000 }), { status: 200 });
     if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify([]), { status: 200 });
     if (String(input).endsWith('/api/v1/orders')) return new Response(JSON.stringify({ orderId: 'created' }), { status: 200 });
@@ -131,9 +155,11 @@ test('order_execute posts exactly once for an approved preview and reports ambig
   const timeoutDeps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input, init) => {
     timeoutCalls.push({ input: String(input), method: init?.method });
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ isOpen: true }), { status: 200 });
     if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ amount: 200000 }), { status: 200 });
     if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify([]), { status: 200 });
-    throw new Error('Toss API request timed out after 15000ms');
+    if (String(input).endsWith('/api/v1/orders')) throw new Error('Toss API request timed out after 15000ms');
+    return new Response('{}', { status: 200 });
   });
   const timeoutPreview = await executeTool('order_preview', { request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '70000', currency: 'KRW' } }, timeoutDeps);
   const timeoutResult = await executeTool('order_execute', { previewId: timeoutPreview.previewId, confirmation: WORKFLOW_CONFIRMATION_TEXT, requestHash: timeoutPreview.requestHash }, timeoutDeps);
