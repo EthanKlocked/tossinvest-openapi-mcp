@@ -13,6 +13,7 @@ export interface RequestOptions {
   accountRequired?: boolean;
   accountSeq?: number;
   body?: unknown;
+  retryInvalidToken?: boolean;
 }
 
 export class TossInvestClient {
@@ -142,7 +143,7 @@ export class TossInvestClient {
     };
 
     let { response, payload } = await execute(await this.getToken());
-    if (isInvalidTokenResponse(response, payload)) {
+    if (options.retryInvalidToken !== false && isInvalidTokenResponse(response, payload)) {
       this.tokenCache = undefined;
       ({ response, payload } = await execute(await this.getToken()));
     }
