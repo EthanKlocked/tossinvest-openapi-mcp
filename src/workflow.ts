@@ -92,7 +92,7 @@ function quantityOf(value: unknown): number | undefined {
 
 function amountOf(value: unknown): number | undefined {
   const record = asRecord(value);
-  return numberValue(
+  const direct = numberValue(
     record.amount
     ?? record.availableAmount
     ?? record.buyingPower
@@ -107,6 +107,15 @@ function amountOf(value: unknown): number | undefined {
     ?? record.evaluationAmount
     ?? record.marketValue
   );
+  if (direct !== undefined) return direct;
+  for (const key of ['result', 'data', 'payload', 'body']) {
+    const nested = asRecord(record[key]);
+    if (Object.keys(nested).length > 0) {
+      const nestedAmount = amountOf(nested);
+      if (nestedAmount !== undefined) return nestedAmount;
+    }
+  }
+  return undefined;
 }
 
 function priceOf(value: unknown): number | undefined {
@@ -138,14 +147,20 @@ function statusOf(order: unknown): string {
   return upper(record.status ?? record.orderStatus ?? record.state) ?? 'UNKNOWN';
 }
 
-function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string } {
+function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string; nonBusinessDay?: boolean } {
   const record = asRecord(payload);
-  const session = text(record.session ?? record.marketSession ?? record.tradingSession ?? record.sessionName);
-  const rawStatus = upper(record.sessionStatus ?? record.marketStatus ?? record.status ?? record.state ?? record.tradingStatus);
-  const direct = record.isOpen ?? record.open ?? record.marketOpen ?? record.isMarketOpen ?? record.tradingOpen;
+  const today = asRecord(record.today);
+  const source = Object.keys(today).length > 0 ? today : record;
+  const sessionValue = Object.prototype.hasOwnProperty.call(source, 'session')
+    ? source.session
+    : source.marketSession ?? source.tradingSession ?? source.sessionName;
+  const session = text(sessionValue);
+  const rawStatus = upper(source.sessionStatus ?? source.marketStatus ?? source.status ?? source.state ?? source.tradingStatus);
+  const direct = source.isOpen ?? source.open ?? source.marketOpen ?? source.isMarketOpen ?? source.tradingOpen;
+  if (sessionValue === null) return { open: false, session, rawStatus, nonBusinessDay: true };
   if (direct === true || direct === false) return { open: direct, session, rawStatus };
-  if (rawStatus && /OPEN|REGULAR|TRADING/.test(rawStatus) && !/CLOSE|CLOSED|HALT|SUSPEND|BREAK/.test(rawStatus)) return { open: true, session, rawStatus };
-  if (rawStatus && /CLOSE|CLOSED|HALT|SUSPEND|BREAK/.test(rawStatus)) return { open: false, session, rawStatus };
+  if (rawStatus && /OPEN|REGULAR|TRADING/.test(rawStatus) && !/CLOSE|CLOSED|HALT|SUSPEND|BREAK|HOLIDAY|NON_BUSINESS/.test(rawStatus)) return { open: true, session, rawStatus };
+  if (rawStatus && /CLOSE|CLOSED|HALT|SUSPEND|BREAK|HOLIDAY|NON_BUSINESS/.test(rawStatus)) return { open: false, session, rawStatus, nonBusinessDay: /HOLIDAY|NON_BUSINESS/.test(rawStatus) };
   return { session, rawStatus };
 }
 
@@ -289,7 +304,11 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
     reads.push(market);
     if (market.ok) {
       const state = marketOpenState(market.data);
-      if (state.open === false) blockers.push(check('market_closed', 'blocker', 'Official market calendar indicates the market is closed.', { session: state.session, rawStatus: state.rawStatus }));
+      if (state.open === false) {
+        const code = state.nonBusinessDay ? 'non_business_day' : 'market_closed';
+        const message = state.nonBusinessDay ? 'Official market calendar indicates today has no trading session.' : 'Official market calendar indicates the market is closed.';
+        blockers.push(check(code, 'blocker', message, { session: state.session, rawStatus: state.rawStatus }));
+      }
       else if (state.open === true) checks.push(check('market_open', 'pass', 'Official market calendar indicates market is open.', { session: state.session, rawStatus: state.rawStatus }));
       else missing.push(check('market_open_unknown', 'missing', 'Market open state was not present in the official payload.', { session: state.session, rawStatus: state.rawStatus }));
     } else warnings.push(check('market_calendar_unavailable', 'warning', market.error));
