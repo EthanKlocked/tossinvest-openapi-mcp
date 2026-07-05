@@ -83,10 +83,11 @@ test('pre_trade_check parses official-style buying power aliases, market session
   assert.equal(commission.estimatedFee, 105);
 });
 
-test('pre_trade_check treats null today market session as non-business-day blocker', async () => {
+test('pre_trade_check and order_preview classify KR/US null today market sessions as non-business-day blockers', async () => {
+  clearPreviewStoreForTests();
   const deps = makeDeps({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '100000', ALLOWED_SYMBOLS: '005930' }, async (input) => {
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
-    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ result: { today: { session: null } } }), { status: 200 });
+    if (String(input).includes('/api/v1/market-calendar')) return new Response(JSON.stringify({ result: { calendars: { KR: { today: { session: null } }, US: { today: { session: null } } } } }), { status: 200 });
     if (String(input).includes('/api/v1/stocks/005930/warnings')) return new Response(JSON.stringify({ warnings: [] }), { status: 200 });
     if (String(input).includes('/api/v1/price-limits')) return new Response(JSON.stringify({ upperLimit: 80000, lowerLimit: 60000 }), { status: 200 });
     if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 200000 } }), { status: 200 });
@@ -95,14 +96,17 @@ test('pre_trade_check treats null today market session as non-business-day block
     return new Response('{}', { status: 200 });
   });
 
-  const result = await executeTool('pre_trade_check', {
-    request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '70000', currency: 'KRW' }
-  }, deps);
+  const request = { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '70000', currency: 'KRW' };
+  const result = await executeTool('pre_trade_check', { request }, deps);
+  const preview = await executeTool('order_preview', { request }, deps);
 
   assert.equal(result.canProceedDryRun, false);
   assert.ok(result.blockers.some((item) => item.code === 'market_closed_non_business_day'));
   assert.ok(!result.missing.some((item) => item.code === 'market_open_unknown'));
   assert.ok(result.checks.some((item) => item.code === 'buying_power_sufficient' && item.available === 200000));
+  assert.equal(preview.executable, false);
+  assert.ok(preview.gate.blockers.some((item) => item.code === 'market_closed_non_business_day'));
+  assert.ok(!preview.gate.missing.some((item) => item.code === 'market_open_unknown'));
 });
 
 test('order_preview never calls Toss order POST and returns preview contract fields', async () => {

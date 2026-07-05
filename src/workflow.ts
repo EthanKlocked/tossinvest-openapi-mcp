@@ -147,16 +147,43 @@ function statusOf(order: unknown): string {
   return upper(record.status ?? record.orderStatus ?? record.state) ?? 'UNKNOWN';
 }
 
-function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string; nonBusinessDay?: boolean } {
-  const original = asRecord(payload);
-  let record = original;
-  for (const key of ['result', 'data', 'payload', 'body']) {
-    const nested = asRecord(record[key]);
-    if (Object.keys(nested).length > 0 && (nested.today !== undefined || nested.session !== undefined || nested.sessionStatus !== undefined || nested.marketStatus !== undefined)) {
-      record = nested;
-      break;
+function hasMarketCalendarShape(record: JsonRecord): boolean {
+  return record.today !== undefined
+    || record.session !== undefined
+    || record.marketSession !== undefined
+    || record.tradingSession !== undefined
+    || record.sessionName !== undefined
+    || record.sessionStatus !== undefined
+    || record.marketStatus !== undefined
+    || record.tradingStatus !== undefined
+    || record.isOpen !== undefined
+    || record.open !== undefined
+    || record.marketOpen !== undefined
+    || record.isMarketOpen !== undefined
+    || record.tradingOpen !== undefined;
+}
+
+function findMarketCalendarRecord(value: unknown, depth = 0): JsonRecord | undefined {
+  if (depth > 8 || value === null || value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findMarketCalendarRecord(item, depth + 1);
+      if (found) return found;
     }
+    return undefined;
   }
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return undefined;
+  if (hasMarketCalendarShape(record)) return record;
+  for (const nested of Object.values(record)) {
+    const found = findMarketCalendarRecord(nested, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string; nonBusinessDay?: boolean } {
+  const record = findMarketCalendarRecord(payload) ?? asRecord(payload);
   const today = asRecord(record.today);
   const source = Object.keys(today).length > 0 ? today : record;
   const sessionValue = Object.prototype.hasOwnProperty.call(source, 'session')
