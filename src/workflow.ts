@@ -92,7 +92,21 @@ function quantityOf(value: unknown): number | undefined {
 
 function amountOf(value: unknown): number | undefined {
   const record = asRecord(value);
-  return numberValue(record.amount ?? record.availableAmount ?? record.buyingPower ?? record.cash ?? record.orderAmount ?? record.valuationAmount ?? record.evaluationAmount ?? record.marketValue);
+  return numberValue(
+    record.amount
+    ?? record.availableAmount
+    ?? record.buyingPower
+    ?? record.cashBuyingPower
+    ?? record.cashOrderableAmount
+    ?? record.orderableAmount
+    ?? record.availableCash
+    ?? record.withdrawableAmount
+    ?? record.cash
+    ?? record.orderAmount
+    ?? record.valuationAmount
+    ?? record.evaluationAmount
+    ?? record.marketValue
+  );
 }
 
 function priceOf(value: unknown): number | undefined {
@@ -122,6 +136,29 @@ function sideOf(request: JsonRecord): string {
 function statusOf(order: unknown): string {
   const record = asRecord(order);
   return upper(record.status ?? record.orderStatus ?? record.state) ?? 'UNKNOWN';
+}
+
+function marketOpenState(payload: unknown): { open?: boolean; session?: string; rawStatus?: string } {
+  const record = asRecord(payload);
+  const session = text(record.session ?? record.marketSession ?? record.tradingSession ?? record.sessionName);
+  const rawStatus = upper(record.sessionStatus ?? record.marketStatus ?? record.status ?? record.state ?? record.tradingStatus);
+  const direct = record.isOpen ?? record.open ?? record.marketOpen ?? record.isMarketOpen ?? record.tradingOpen;
+  if (direct === true || direct === false) return { open: direct, session, rawStatus };
+  if (rawStatus && /OPEN|REGULAR|TRADING/.test(rawStatus) && !/CLOSE|CLOSED|HALT|SUSPEND|BREAK/.test(rawStatus)) return { open: true, session, rawStatus };
+  if (rawStatus && /CLOSE|CLOSED|HALT|SUSPEND|BREAK/.test(rawStatus)) return { open: false, session, rawStatus };
+  return { session, rawStatus };
+}
+
+function commissionRateOf(payload: unknown): number | undefined {
+  const record = asRecord(payload);
+  const raw = numberValue(record.commissionRate ?? record.feeRate ?? record.rate ?? record.orderFeeRate ?? record.tradingFeeRate);
+  if (raw === undefined) return undefined;
+  return raw > 1 ? raw / 100 : raw;
+}
+
+function fixedFeeOf(payload: unknown): number | undefined {
+  const record = asRecord(payload);
+  return numberValue(record.fee ?? record.commission ?? record.commissionAmount ?? record.minimumFee ?? record.minFee);
 }
 
 function check(code: string, status: Severity, message: string, details: JsonRecord = {}) {
@@ -251,11 +288,10 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
     const market = await safeRead('market_calendar', () => deps.client.get('/api/v1/market-calendar/KR', { query: { date: text(args.date) } }));
     reads.push(market);
     if (market.ok) {
-      const record = asRecord(market.data);
-      const open = record.isOpen ?? record.open ?? record.marketOpen;
-      if (open === false) blockers.push(check('market_closed', 'blocker', 'Official market calendar indicates the market is closed.'));
-      else if (open === true) checks.push(check('market_open', 'pass', 'Official market calendar indicates market is open.'));
-      else missing.push(check('market_open_unknown', 'missing', 'Market open state was not present in the official payload.'));
+      const state = marketOpenState(market.data);
+      if (state.open === false) blockers.push(check('market_closed', 'blocker', 'Official market calendar indicates the market is closed.', { session: state.session, rawStatus: state.rawStatus }));
+      else if (state.open === true) checks.push(check('market_open', 'pass', 'Official market calendar indicates market is open.', { session: state.session, rawStatus: state.rawStatus }));
+      else missing.push(check('market_open_unknown', 'missing', 'Market open state was not present in the official payload.', { session: state.session, rawStatus: state.rawStatus }));
     } else warnings.push(check('market_calendar_unavailable', 'warning', market.error));
 
     const stockWarnings = await safeRead('stock_warnings', () => deps.client.get(`/api/v1/stocks/${encodeURIComponent(symbol)}/warnings`, { query: {} }));
@@ -301,8 +337,14 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
 
   const commissions = await safeRead('commissions', () => deps.client.get('/api/v1/commissions', { accountRequired: true, accountSeq: numberValue(args.accountSeq) }));
   reads.push(commissions);
-  if (commissions.ok) checks.push(check('commission_payload_available', 'pass', 'Commission payload was read for caller-side fee estimation.', { payload: redactSensitive(commissions.data) }));
-  else missing.push(check('commission_unavailable', 'missing', 'Commission/fee payload unavailable; fee estimate is not calculable.', { error: commissions.error }));
+  if (commissions.ok) {
+    const rate = commissionRateOf(commissions.data);
+    const fixedFee = fixedFeeOf(commissions.data);
+    const variableFee = rate !== undefined && estimatedAmount !== undefined ? estimatedAmount * rate : undefined;
+    const estimatedFee = variableFee !== undefined || fixedFee !== undefined ? (variableFee ?? 0) + (fixedFee ?? 0) : undefined;
+    if (estimatedFee !== undefined) checks.push(check('commission_estimated', 'pass', 'Commission payload was read and a best-effort fee estimate was calculated.', { estimatedFee, rate, fixedFee, payload: redactSensitive(commissions.data) }));
+    else checks.push(check('commission_payload_available', 'pass', 'Commission payload was read for caller-side fee estimation.', { payload: redactSensitive(commissions.data) }));
+  } else missing.push(check('commission_unavailable', 'missing', 'Commission/fee payload unavailable; fee estimate is not calculable.', { error: commissions.error }));
 
   const openOrders = await safeRead('open_orders', () => readOpenOrders({ ...args, symbol, limit: 100 }, deps));
   reads.push(openOrders);
@@ -374,7 +416,7 @@ export async function orderPreview(args: JsonRecord, deps: ToolDeps) {
     confirmationText: WORKFLOW_CONFIRMATION_TEXT,
     estimatedAmount: evaluation.estimatedAmount,
     currency: evaluation.currency,
-    fee: { status: evaluation.checks.some((item) => item.code === 'commission_payload_available') ? 'source_payload_available' : 'not_calculable' },
+    fee: evaluation.checks.find((item) => item.code === 'commission_estimated') ?? (evaluation.checks.some((item) => item.code === 'commission_payload_available') ? { status: 'source_payload_available' } : { status: 'not_calculable' }),
     cashCheck: evaluation.checks.find((item) => item.code === 'buying_power_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_buying_power') ?? { status: 'not_calculable' },
     quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? { status: 'not_applicable_or_not_calculable' },
     gate: { status: evaluation.blockers.length === 0 ? 'pass' : 'blocked', blockers: evaluation.blockers, warnings: evaluation.warnings, missing: evaluation.missing },
