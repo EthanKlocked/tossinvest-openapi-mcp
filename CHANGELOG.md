@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added GET-only retry/backoff for transient Toss API 429 and 502/503/504 responses while keeping order POST requests non-retried.
+- Reduced `portfolio_snapshot` read concurrency and added additive `holdings.reason`/`holdings.error` fields so failed reads are not confused with empty accounts.
+- Documented that partial `portfolio_snapshot` responses should not be treated as complete position counts.
+
 ## 0.1.0
 
 - Initial local stdio MCP server for the official Toss Securities Open API.

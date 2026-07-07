@@ -142,10 +142,25 @@ export class TossInvestClient {
       return { response, payload };
     };
 
-    let { response, payload } = await execute(await this.getToken());
-    if (options.retryInvalidToken !== false && isInvalidTokenResponse(response, payload)) {
-      this.tokenCache = undefined;
-      ({ response, payload } = await execute(await this.getToken()));
+    let token = await this.getToken();
+    let invalidTokenRetried = false;
+    let retryableAttempt = 0;
+    let { response, payload } = await execute(token);
+    while (true) {
+      if (options.retryInvalidToken !== false && !invalidTokenRetried && isInvalidTokenResponse(response, payload)) {
+        this.tokenCache = undefined;
+        token = await this.getToken();
+        invalidTokenRetried = true;
+        ({ response, payload } = await execute(token));
+        continue;
+      }
+      if (method === 'GET' && shouldRetryGetResponse(response, retryableAttempt)) {
+        await sleep(retryDelayMs(response, retryableAttempt));
+        retryableAttempt += 1;
+        ({ response, payload } = await execute(token));
+        continue;
+      }
+      break;
     }
 
     if (!response.ok) throw new Error(`Toss API ${method} ${path} failed (${response.status}): ${JSON.stringify(redactSensitive(payload))}`);
@@ -161,6 +176,27 @@ export class TossInvestClient {
 function isInvalidTokenResponse(response: Response, payload: unknown): boolean {
   if (response.status !== 401) return false;
   return containsInvalidToken(payload);
+}
+
+function shouldRetryGetResponse(response: Response, attempt: number): boolean {
+  if (response.status === 429) return attempt < 3;
+  if ([502, 503, 504].includes(response.status)) return attempt < 2;
+  return false;
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get('Retry-After');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+  }
+  return Math.min(4000, 1000 * 2 ** attempt);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function containsInvalidToken(value: unknown): boolean {

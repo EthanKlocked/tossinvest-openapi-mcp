@@ -19,7 +19,7 @@ test('portfolio_snapshot returns structured partial results and warning flags', 
     if (String(input).includes('/api/v1/holdings')) return new Response(JSON.stringify([{ symbol: '005930', quantity: 2, price: 70000, valuationAmount: 140000 }]), { status: 200 });
     if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify([{ orderId: 'open-1', symbol: '005930', status: 'OPEN' }]), { status: 200 });
     if (String(input).includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ currency: 'KRW', amount: 1000000 }), { status: 200 });
-    return new Response(JSON.stringify({ message: 'USD endpoint unavailable' }), { status: 503 });
+    return new Response(JSON.stringify({ message: 'USD endpoint unavailable' }), { status: 503, headers: { 'Retry-After': '0' } });
   });
 
   const snapshot = await executeTool('portfolio_snapshot', {}, deps);
@@ -56,6 +56,49 @@ test('portfolio_snapshot unfolds official holdings result.items payload', async 
   assert.equal(snapshot.holdings.items[0].quantity, 14);
   assert.ok(!snapshot.warningFlags.includes('holdings_empty_or_unavailable'));
   assert.equal(snapshot.positionWeights.status, 'calculated');
+});
+
+test('portfolio_snapshot retries transient holdings 429 and returns a complete snapshot', async () => {
+  const calls = [];
+  const deps = makeDeps({}, async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (url.includes('/api/v1/holdings')) {
+      const holdingsAttempts = calls.filter((call) => call.includes('/api/v1/holdings')).length;
+      if (holdingsAttempts === 1) return new Response(JSON.stringify({ message: 'rate limited' }), { status: 429, headers: { 'Retry-After': '0' } });
+      return new Response(JSON.stringify({ result: { items: [{ symbol: '005930', quantity: 1, valuationAmount: 70000 }] } }), { status: 200 });
+    }
+    if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1 }, deps);
+  assert.equal(snapshot.status, 'ok');
+  assert.equal(snapshot.holdings.count, 1);
+  assert.equal(snapshot.holdings.reason, 'ok');
+  assert.equal(snapshot.partialFailures.length, 0);
+  assert.equal(calls.filter((call) => call.includes('/api/v1/holdings')).length, 2);
+});
+
+test('portfolio_snapshot marks holdings read failures separately from an empty account', async () => {
+  const deps = makeDeps({}, async (input) => {
+    const url = String(input);
+    if (url.endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (url.includes('/api/v1/holdings')) return new Response(JSON.stringify({ message: 'rate limited' }), { status: 429, headers: { 'Retry-After': '0' } });
+    if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1 }, deps);
+  assert.equal(snapshot.status, 'partial');
+  assert.equal(snapshot.holdings.status, 'partial_failure');
+  assert.equal(snapshot.holdings.reason, 'read_failed');
+  assert.match(snapshot.holdings.error, /429/);
+  assert.ok(snapshot.partialFailures.some((failure) => failure.source === 'holdings' && /429/.test(failure.error)));
+  assert.ok(snapshot.warningFlags.includes('holdings_empty_or_unavailable'));
 });
 
 test('order_status_summary unfolds official closed orders result.orders payload', async () => {

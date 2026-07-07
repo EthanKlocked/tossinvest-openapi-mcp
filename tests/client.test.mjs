@@ -77,6 +77,33 @@ test('invalid-token retry happens only once before returning the API error', asy
   assert.equal(calls.filter((call) => call.input.endsWith('/api/v1/prices')).length, 2);
 });
 
+test('GET retries one 429 response and then returns the successful payload', async () => {
+  const calls = [];
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input, init) => {
+    calls.push({ input: String(input), init });
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (calls.filter((call) => call.input.includes('/api/v1/holdings')).length === 1) {
+      return new Response(JSON.stringify({ message: 'rate limited' }), { status: 429, headers: { 'Retry-After': '0' } });
+    }
+    return new Response(JSON.stringify({ result: { items: [{ symbol: '005930' }] } }), { status: 200 });
+  });
+
+  assert.deepEqual(await client.get('/api/v1/holdings', { accountRequired: true, accountSeq: 1 }), { result: { items: [{ symbol: '005930' }] } });
+  assert.equal(calls.filter((call) => call.input.includes('/api/v1/holdings')).length, 2);
+});
+
+test('GET retry exhaustion preserves HTTP status in the thrown error', async () => {
+  const calls = [];
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input) => {
+    calls.push(String(input));
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    return new Response(JSON.stringify({ message: 'still rate limited' }), { status: 429, headers: { 'Retry-After': '0' } });
+  });
+
+  await assert.rejects(client.get('/api/v1/holdings', { accountRequired: true, accountSeq: 1 }), /failed \(429\)/);
+  assert.equal(calls.filter((input) => input.includes('/api/v1/holdings')).length, 4);
+});
+
 test('auth status separates token issuance from data endpoint reachability and accountSeq configuration', async () => {
   const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input) => {
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });

@@ -33,6 +33,22 @@ test('order_create performs official POST only when all gates pass', async () =>
   assert.equal(calls[1].method, 'POST');
 });
 
+test('order_create does not retry failed official POST responses', async () => {
+  const calls = [];
+  const config = loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret', TOSS_ACCOUNT_SEQ: '1', ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '1000', ALLOWED_SYMBOLS: '005930' });
+  const client = new TossInvestClient(config, async (input, init) => {
+    calls.push({ input: String(input), method: init?.method, body: init?.body });
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    return new Response(JSON.stringify({ message: 'temporary unavailable' }), { status: 503 });
+  });
+
+  await assert.rejects(
+    executeTool('order_create', { dryRun: false, confirmation: CONFIRMATION_TEXT, request: { symbol: '005930', side: 'BUY', orderType: 'LIMIT', quantity: '1', price: '1', currency: 'KRW' } }, { client, config }),
+    /failed \(503\)/
+  );
+  assert.equal(calls.filter((call) => call.input.includes('/api/v1/orders') && call.method === 'POST').length, 1);
+});
+
 test('order_create rejects non-LIMIT order types even when gates pass', async () => {
   const calls = [];
   const config = loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret', TOSS_ACCOUNT_SEQ: '1', ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_KRW: '1000', ALLOWED_SYMBOLS: '005930' });
