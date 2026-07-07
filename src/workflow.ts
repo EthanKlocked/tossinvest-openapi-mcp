@@ -331,11 +331,12 @@ async function readBuyingPower(currency: string, args: JsonRecord, deps: ToolDep
 
 export async function portfolioSnapshot(args: JsonRecord, deps: ToolDeps) {
   const currencies = Array.isArray(args.currencies) ? args.currencies.map(String) : ['KRW', 'USD'];
-  const reads = await Promise.all([
-    safeRead('holdings', () => deps.client.get('/api/v1/holdings', { accountRequired: true, accountSeq: numberValue(args.accountSeq) })),
-    safeRead('openOrders', () => readOpenOrders({ ...args, limit: args.limit ?? 100 }, deps)),
-    ...currencies.map((currency) => safeRead(`buyingPower.${currency.toUpperCase()}`, () => readBuyingPower(currency.toUpperCase(), args, deps)))
-  ]);
+  const reads = [];
+  reads.push(await safeRead('holdings', () => deps.client.get('/api/v1/holdings', { accountRequired: true, accountSeq: numberValue(args.accountSeq) })));
+  reads.push(await safeRead('openOrders', () => readOpenOrders({ ...args, limit: args.limit ?? 100 }, deps)));
+  for (const currency of currencies.map((item) => item.toUpperCase())) {
+    reads.push(await safeRead(`buyingPower.${currency}`, () => readBuyingPower(currency, args, deps)));
+  }
   const holdingRead = reads.find((read) => read.label === 'holdings');
   const orderRead = reads.find((read) => read.label === 'openOrders');
   const holdings = holdingRead?.ok ? asArray(holdingRead.data) : [];
@@ -349,10 +350,12 @@ export async function portfolioSnapshot(args: JsonRecord, deps: ToolDeps) {
   const warningFlags = [];
   if (partialFailures.length > 0) warningFlags.push('partial_failures_present');
   if (holdings.length === 0) warningFlags.push('holdings_empty_or_unavailable');
+  const holdingsStatus = holdingRead?.ok ? 'ok' : 'partial_failure';
+  const holdingsReason = holdingRead?.ok ? (holdings.length === 0 ? 'empty_account' : 'ok') : 'read_failed';
   return {
     status: partialFailures.length ? 'partial' : 'ok',
     account: { accountSeq: numberValue(args.accountSeq) ?? deps.config.accountSeq ?? null, accountSeqConfigured: (numberValue(args.accountSeq) ?? deps.config.accountSeq) !== undefined },
-    holdings: { status: holdingRead?.ok ? 'ok' : 'partial_failure', count: holdings.length, items: summarizeHoldings(holdings) },
+    holdings: { status: holdingsStatus, reason: holdingsReason, count: holdings.length, items: summarizeHoldings(holdings), error: holdingRead && !holdingRead.ok ? holdingRead.error : undefined },
     buyingPower,
     openOrders: { status: orderRead?.ok ? 'ok' : 'partial_failure', count: openOrders.length, items: redactSensitive(openOrders) },
     positionWeights: { status: totalHoldingValue(holdings) ? 'calculated' : 'not_calculable', basis: 'holding valuationAmount/evaluationAmount/marketValue when supplied by official API' },
