@@ -273,6 +273,22 @@ async function safeRead(label: string, read: () => Promise<unknown>) {
   }
 }
 
+function holdingCurrencyOf(value: unknown): string {
+  const record = asRecord(value);
+  const explicit = upper(record.currency);
+  if (explicit) return explicit;
+  const symbol = symbolOf(record);
+  return symbol && /^\d{6}$/.test(symbol) ? 'KRW' : 'USD';
+}
+
+function exchangeRateOf(payload: unknown): number | undefined {
+  const record = asRecord(payload);
+  const direct = numberValue(record.rate ?? record.midRate ?? record.exchangeRate ?? record.baseRate);
+  if (direct !== undefined) return direct;
+  const result = asRecord(record.result ?? record.data ?? record.payload ?? record.body);
+  return numberValue(result.rate ?? result.midRate ?? result.exchangeRate ?? result.baseRate);
+}
+
 function totalHoldingValue(holdings: unknown[]): number | undefined {
   let total = 0;
   let found = false;
@@ -286,18 +302,29 @@ function totalHoldingValue(holdings: unknown[]): number | undefined {
   return found ? total : undefined;
 }
 
-function summarizeHoldings(holdings: unknown[]) {
-  const totalValue = totalHoldingValue(holdings);
+function valueKrwOf(record: JsonRecord, usdKrw: number): number | undefined {
+  const value = amountOf(record);
+  if (value === undefined) return undefined;
+  return holdingCurrencyOf(record) === 'USD' ? value * usdKrw : value;
+}
+
+function summarizeHoldings(holdings: unknown[], options: { totalValue?: number; usdKrw?: number; forceNotCalculable?: boolean } = {}) {
+  const totalValue = options.totalValue ?? totalHoldingValue(holdings);
   return holdings.map((holding) => {
     const record = asRecord(holding);
     const value = amountOf(record);
+    const currency = holdingCurrencyOf(record);
+    const valueKrw = options.usdKrw !== undefined && value !== undefined ? valueKrwOf(record, options.usdKrw) : undefined;
+    const calculable = !options.forceNotCalculable && value !== undefined && totalValue !== undefined && totalValue > 0;
     return {
       ...redactSensitive(record),
       symbol: symbolOf(record) ?? record.symbol,
+      currency,
       quantity: quantityOf(record),
       valuationAmount: value,
-      weight: value !== undefined && totalValue && totalValue > 0 ? value / totalValue : undefined,
-      weightStatus: value !== undefined && totalValue && totalValue > 0 ? 'calculated' : 'not_calculable'
+      valueKrw,
+      weight: calculable ? (valueKrw ?? value) / totalValue : undefined,
+      weightStatus: calculable ? 'calculated' : 'not_calculable'
     };
   });
 }
@@ -334,31 +361,66 @@ export async function portfolioSnapshot(args: JsonRecord, deps: ToolDeps) {
   const reads = [];
   reads.push(await safeRead('holdings', () => deps.client.get('/api/v1/holdings', { accountRequired: true, accountSeq: numberValue(args.accountSeq) })));
   reads.push(await safeRead('openOrders', () => readOpenOrders({ ...args, limit: args.limit ?? 100 }, deps)));
+  const holdingRead = reads.find((read) => read.label === 'holdings');
+  const holdings = holdingRead?.ok ? asArray(holdingRead.data) : [];
+  const holdingCurrencies = new Set(holdings.map(holdingCurrencyOf));
+  const mixedCurrencyHoldings = holdingCurrencies.has('KRW') && holdingCurrencies.has('USD');
+  if (mixedCurrencyHoldings) {
+    reads.push(await safeRead('exchangeRate.USDKRW', () => deps.client.get('/api/v1/exchange-rate', { query: { baseCurrency: 'USD', quoteCurrency: 'KRW' } })));
+  }
   for (const currency of currencies.map((item) => item.toUpperCase())) {
     reads.push(await safeRead(`buyingPower.${currency}`, () => readBuyingPower(currency, args, deps)));
   }
-  const holdingRead = reads.find((read) => read.label === 'holdings');
   const orderRead = reads.find((read) => read.label === 'openOrders');
-  const holdings = holdingRead?.ok ? asArray(holdingRead.data) : [];
+  const fxRead = reads.find((read) => read.label === 'exchangeRate.USDKRW');
+  const usdKrw = fxRead?.ok ? exchangeRateOf(fxRead.data) : undefined;
+  const fxUnavailable = mixedCurrencyHoldings && (usdKrw === undefined || usdKrw <= 0);
   const openOrders = orderRead?.ok ? asArray(orderRead.data) : [];
   const partialFailures = reads.filter((read) => !read.ok).map((read) => ({ source: read.label, error: read.ok ? undefined : read.error }));
+  if (mixedCurrencyHoldings && fxRead?.ok && fxUnavailable) partialFailures.push({ source: 'exchangeRate.USDKRW', error: 'USD/KRW exchange rate was not present or invalid' });
   const buyingPower: JsonRecord = {};
+  let cashValueKrw = 0;
+  let foundCashValue = false;
   for (const currency of currencies.map((item) => item.toUpperCase())) {
     const read = reads.find((candidate) => candidate.label === `buyingPower.${currency}`);
-    buyingPower[currency] = read?.ok ? { status: 'ok', ...asRecord(redactSensitive(read.data)), amount: amountOf(read.data) } : { status: 'partial_failure', error: read && !read.ok ? read.error : 'not_read' };
+    const amount = read?.ok ? amountOf(read.data) : undefined;
+    buyingPower[currency] = read?.ok ? { status: 'ok', ...asRecord(redactSensitive(read.data)), amount } : { status: 'partial_failure', error: read && !read.ok ? read.error : 'not_read' };
+    if (!fxUnavailable && amount !== undefined) {
+      if (currency === 'USD' && usdKrw !== undefined) {
+        cashValueKrw += amount * usdKrw;
+        foundCashValue = true;
+      } else if (currency === 'KRW') {
+        cashValueKrw += amount;
+        foundCashValue = true;
+      }
+    }
   }
+  let holdingsValueKrw = 0;
+  let foundHoldingValueKrw = false;
+  if (!fxUnavailable && usdKrw !== undefined) {
+    for (const holding of holdings) {
+      const valueKrw = valueKrwOf(asRecord(holding), usdKrw);
+      if (valueKrw !== undefined) {
+        holdingsValueKrw += valueKrw;
+        foundHoldingValueKrw = true;
+      }
+    }
+  }
+  const useKrwWeights = mixedCurrencyHoldings && !fxUnavailable && foundHoldingValueKrw;
+  const totalValueKrw = useKrwWeights ? holdingsValueKrw + (foundCashValue ? cashValueKrw : 0) : undefined;
   const warningFlags = [];
   if (partialFailures.length > 0) warningFlags.push('partial_failures_present');
   if (holdings.length === 0) warningFlags.push('holdings_empty_or_unavailable');
   const holdingsStatus = holdingRead?.ok ? 'ok' : 'partial_failure';
   const holdingsReason = holdingRead?.ok ? (holdings.length === 0 ? 'empty_account' : 'ok') : 'read_failed';
+  const positionStatus = fxUnavailable ? 'not_calculable' : (useKrwWeights ? 'calculated' : (totalHoldingValue(holdings) ? 'calculated' : 'not_calculable'));
   return {
     status: partialFailures.length ? 'partial' : 'ok',
     account: { accountSeq: numberValue(args.accountSeq) ?? deps.config.accountSeq ?? null, accountSeqConfigured: (numberValue(args.accountSeq) ?? deps.config.accountSeq) !== undefined },
-    holdings: { status: holdingsStatus, reason: holdingsReason, count: holdings.length, items: summarizeHoldings(holdings), error: holdingRead && !holdingRead.ok ? holdingRead.error : undefined },
+    holdings: { status: holdingsStatus, reason: holdingsReason, count: holdings.length, items: summarizeHoldings(holdings, { totalValue: totalValueKrw, usdKrw: useKrwWeights ? usdKrw : undefined, forceNotCalculable: fxUnavailable }), error: holdingRead && !holdingRead.ok ? holdingRead.error : undefined },
     buyingPower,
     openOrders: { status: orderRead?.ok ? 'ok' : 'partial_failure', count: openOrders.length, items: redactSensitive(openOrders) },
-    positionWeights: { status: totalHoldingValue(holdings) ? 'calculated' : 'not_calculable', basis: 'holding valuationAmount/evaluationAmount/marketValue when supplied by official API' },
+    positionWeights: useKrwWeights ? { status: positionStatus, basis: 'KRW-converted holdings plus cash buying power', fx: { USDKRW: usdKrw }, holdingsValueKrw, cashValueKrw: foundCashValue ? cashValueKrw : undefined, totalValueKrw } : { status: positionStatus, reason: fxUnavailable ? 'fx_unavailable' : undefined, basis: fxUnavailable ? 'KRW/USD mixed holdings require USD/KRW exchange-rate data' : 'holding valuationAmount/evaluationAmount/marketValue when supplied by official API' },
     warningFlags,
     partialFailures,
     dataFreshness: { generatedAt: nowIso(), sources: reads.map((read) => ({ source: read.label, ok: read.ok, fetchedAt: read.fetchedAt })) }

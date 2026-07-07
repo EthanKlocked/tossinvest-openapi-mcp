@@ -3,7 +3,9 @@
 ## Unreleased
 
 - Added GET-only retry/backoff for transient Toss API 429 and 502/503/504 responses while keeping order POST requests non-retried.
+- Capped `Retry-After` retry delays so oversized server hints fail quickly instead of blocking local MCP calls.
 - Reduced `portfolio_snapshot` read concurrency and added additive `holdings.reason`/`holdings.error` fields so failed reads are not confused with empty accounts.
+- Updated mixed-currency `portfolio_snapshot` position weights to use USD/KRW FX conversion and a cash-inclusive KRW denominator.
 - Documented that partial `portfolio_snapshot` responses should not be treated as complete position counts.
 
 ## 0.1.0
