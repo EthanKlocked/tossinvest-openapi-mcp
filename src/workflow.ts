@@ -265,7 +265,11 @@ function check(code: string, status: Severity, message: string, details: JsonRec
   return { code, status, message, ...details };
 }
 
-async function safeRead(label: string, read: () => Promise<unknown>) {
+type SafeReadResult =
+  | { label: string; ok: true; data: unknown; fetchedAt: string }
+  | { label: string; ok: false; error: string; fetchedAt: string };
+
+async function safeRead(label: string, read: () => Promise<unknown>): Promise<SafeReadResult> {
   try {
     return { label, ok: true as const, data: await read(), fetchedAt: nowIso() };
   } catch (error) {
@@ -302,20 +306,22 @@ function totalHoldingValue(holdings: unknown[]): number | undefined {
   return found ? total : undefined;
 }
 
-function valueKrwOf(record: JsonRecord, usdKrw: number): number | undefined {
+function valueKrwOf(record: JsonRecord, usdKrw?: number): number | undefined {
   const value = amountOf(record);
   if (value === undefined) return undefined;
-  return holdingCurrencyOf(record) === 'USD' ? value * usdKrw : value;
+  if (holdingCurrencyOf(record) === 'USD') return usdKrw !== undefined ? value * usdKrw : undefined;
+  return value;
 }
 
-function summarizeHoldings(holdings: unknown[], options: { totalValue?: number; usdKrw?: number; forceNotCalculable?: boolean } = {}) {
+function summarizeHoldings(holdings: unknown[], options: { totalValue?: number; usdKrw?: number; forceNotCalculable?: boolean; convertToKrw?: boolean } = {}) {
   const totalValue = options.totalValue ?? totalHoldingValue(holdings);
   return holdings.map((holding) => {
     const record = asRecord(holding);
     const value = amountOf(record);
     const currency = holdingCurrencyOf(record);
-    const valueKrw = options.usdKrw !== undefined && value !== undefined ? valueKrwOf(record, options.usdKrw) : undefined;
-    const calculable = !options.forceNotCalculable && value !== undefined && totalValue !== undefined && totalValue > 0;
+    const valueKrw = options.convertToKrw ? valueKrwOf(record, options.usdKrw) : undefined;
+    const weightValue = valueKrw ?? value;
+    const calculable = !options.forceNotCalculable && weightValue !== undefined && totalValue !== undefined && totalValue > 0;
     return {
       ...redactSensitive(record),
       symbol: symbolOf(record) ?? record.symbol,
@@ -323,7 +329,7 @@ function summarizeHoldings(holdings: unknown[], options: { totalValue?: number; 
       quantity: quantityOf(record),
       valuationAmount: value,
       valueKrw,
-      weight: calculable ? (valueKrw ?? value) / totalValue : undefined,
+      weight: calculable ? weightValue / totalValue : undefined,
       weightStatus: calculable ? 'calculated' : 'not_calculable'
     };
   });
@@ -357,47 +363,60 @@ async function readBuyingPower(currency: string, args: JsonRecord, deps: ToolDep
 }
 
 export async function portfolioSnapshot(args: JsonRecord, deps: ToolDeps) {
-  const currencies = Array.isArray(args.currencies) ? args.currencies.map(String) : ['KRW', 'USD'];
-  const reads = [];
+  const responseCurrencies = Array.isArray(args.currencies) ? args.currencies.map((item) => String(item).toUpperCase()) : ['KRW', 'USD'];
+  const denominatorCurrencies = ['KRW', 'USD'];
+  const reads: SafeReadResult[] = [];
   reads.push(await safeRead('holdings', () => deps.client.get('/api/v1/holdings', { accountRequired: true, accountSeq: numberValue(args.accountSeq) })));
   reads.push(await safeRead('openOrders', () => readOpenOrders({ ...args, limit: args.limit ?? 100 }, deps)));
   const holdingRead = reads.find((read) => read.label === 'holdings');
   const holdings = holdingRead?.ok ? asArray(holdingRead.data) : [];
-  const holdingCurrencies = new Set(holdings.map(holdingCurrencyOf));
-  const mixedCurrencyHoldings = holdingCurrencies.has('KRW') && holdingCurrencies.has('USD');
-  if (mixedCurrencyHoldings) {
-    reads.push(await safeRead('exchangeRate.USDKRW', () => deps.client.get('/api/v1/exchange-rate', { query: { baseCurrency: 'USD', quoteCurrency: 'KRW' } })));
+  for (const currency of denominatorCurrencies) {
+    const label = `buyingPower.${currency}.denominator`;
+    reads.push(await safeRead(label, () => readBuyingPower(currency, args, deps)));
   }
-  for (const currency of currencies.map((item) => item.toUpperCase())) {
-    reads.push(await safeRead(`buyingPower.${currency}`, () => readBuyingPower(currency, args, deps)));
+  const cashReads = new Map(denominatorCurrencies.map((currency) => {
+    const label = `buyingPower.${currency}.denominator`;
+    const read = reads.find((candidate) => candidate.label === label);
+    return [currency, { label, read }] as const;
+  }));
+  const usdCashRead = cashReads.get('USD')?.read;
+  const usdCashAmount = usdCashRead?.ok ? amountOf(usdCashRead.data) : undefined;
+  const usdValueNeeded = holdings.some((holding) => holdingCurrencyOf(holding) === 'USD') || (usdCashAmount !== undefined && usdCashAmount > 0);
+  if (usdValueNeeded) {
+    reads.push(await safeRead('exchangeRate.USDKRW', () => deps.client.get('/api/v1/exchange-rate', { query: { baseCurrency: 'USD', quoteCurrency: 'KRW' } })));
   }
   const orderRead = reads.find((read) => read.label === 'openOrders');
   const fxRead = reads.find((read) => read.label === 'exchangeRate.USDKRW');
   const usdKrw = fxRead?.ok ? exchangeRateOf(fxRead.data) : undefined;
-  const fxUnavailable = mixedCurrencyHoldings && (usdKrw === undefined || usdKrw <= 0);
+  const fxUnavailable = usdValueNeeded && (usdKrw === undefined || usdKrw <= 0);
   const openOrders = orderRead?.ok ? asArray(orderRead.data) : [];
   const partialFailures = reads.filter((read) => !read.ok).map((read) => ({ source: read.label, error: read.ok ? undefined : read.error }));
-  if (mixedCurrencyHoldings && fxRead?.ok && fxUnavailable) partialFailures.push({ source: 'exchangeRate.USDKRW', error: 'USD/KRW exchange rate was not present or invalid' });
+  if (usdValueNeeded && fxRead?.ok && fxUnavailable) partialFailures.push({ source: 'exchangeRate.USDKRW', error: 'USD/KRW exchange rate was not present or invalid' });
   const buyingPower: JsonRecord = {};
   let cashValueKrw = 0;
-  let foundCashValue = false;
-  for (const currency of currencies.map((item) => item.toUpperCase())) {
-    const read = reads.find((candidate) => candidate.label === `buyingPower.${currency}`);
+  const omittedCashCurrencies: string[] = [];
+  for (const currency of denominatorCurrencies) {
+    const entry = cashReads.get(currency);
+    const read = entry?.read;
     const amount = read?.ok ? amountOf(read.data) : undefined;
-    buyingPower[currency] = read?.ok ? { status: 'ok', ...asRecord(redactSensitive(read.data)), amount } : { status: 'partial_failure', error: read && !read.ok ? read.error : 'not_read' };
-    if (!fxUnavailable && amount !== undefined) {
-      if (currency === 'USD' && usdKrw !== undefined) {
-        cashValueKrw += amount * usdKrw;
-        foundCashValue = true;
-      } else if (currency === 'KRW') {
-        cashValueKrw += amount;
-        foundCashValue = true;
-      }
+    if (responseCurrencies.includes(currency)) {
+      buyingPower[currency] = read?.ok ? { status: 'ok', ...asRecord(redactSensitive(read.data)), amount } : { status: 'partial_failure', error: read && !read.ok ? read.error : 'not_read' };
+    }
+    if (!read?.ok || amount === undefined) {
+      omittedCashCurrencies.push(currency);
+      continue;
+    }
+    if (fxUnavailable) continue;
+    if (currency === 'USD') {
+      if (usdKrw !== undefined) cashValueKrw += amount * usdKrw;
+      else if (amount > 0) omittedCashCurrencies.push(currency);
+    } else if (currency === 'KRW') {
+      cashValueKrw += amount;
     }
   }
   let holdingsValueKrw = 0;
   let foundHoldingValueKrw = false;
-  if (!fxUnavailable && usdKrw !== undefined) {
+  if (!fxUnavailable) {
     for (const holding of holdings) {
       const valueKrw = valueKrwOf(asRecord(holding), usdKrw);
       if (valueKrw !== undefined) {
@@ -406,21 +425,23 @@ export async function portfolioSnapshot(args: JsonRecord, deps: ToolDeps) {
       }
     }
   }
-  const useKrwWeights = mixedCurrencyHoldings && !fxUnavailable && foundHoldingValueKrw;
-  const totalValueKrw = useKrwWeights ? holdingsValueKrw + (foundCashValue ? cashValueKrw : 0) : undefined;
+  const useKrwWeights = !fxUnavailable && foundHoldingValueKrw;
+  const totalValueKrw = useKrwWeights ? holdingsValueKrw + cashValueKrw : undefined;
+  const cashStatus = omittedCashCurrencies.length > 0 ? 'partial' : 'complete';
   const warningFlags = [];
   if (partialFailures.length > 0) warningFlags.push('partial_failures_present');
   if (holdings.length === 0) warningFlags.push('holdings_empty_or_unavailable');
   const holdingsStatus = holdingRead?.ok ? 'ok' : 'partial_failure';
   const holdingsReason = holdingRead?.ok ? (holdings.length === 0 ? 'empty_account' : 'ok') : 'read_failed';
-  const positionStatus = fxUnavailable ? 'not_calculable' : (useKrwWeights ? 'calculated' : (totalHoldingValue(holdings) ? 'calculated' : 'not_calculable'));
+  const positionStatus = fxUnavailable ? 'not_calculable' : (useKrwWeights && totalValueKrw && totalValueKrw > 0 ? 'calculated' : 'not_calculable');
+  const positionReason = fxUnavailable ? 'fx_unavailable' : (cashStatus === 'partial' && positionStatus === 'calculated' ? 'cash_incomplete' : undefined);
   return {
     status: partialFailures.length ? 'partial' : 'ok',
     account: { accountSeq: numberValue(args.accountSeq) ?? deps.config.accountSeq ?? null, accountSeqConfigured: (numberValue(args.accountSeq) ?? deps.config.accountSeq) !== undefined },
-    holdings: { status: holdingsStatus, reason: holdingsReason, count: holdings.length, items: summarizeHoldings(holdings, { totalValue: totalValueKrw, usdKrw: useKrwWeights ? usdKrw : undefined, forceNotCalculable: fxUnavailable }), error: holdingRead && !holdingRead.ok ? holdingRead.error : undefined },
+    holdings: { status: holdingsStatus, reason: holdingsReason, count: holdings.length, items: summarizeHoldings(holdings, { totalValue: totalValueKrw, usdKrw, forceNotCalculable: positionStatus !== 'calculated', convertToKrw: useKrwWeights }), error: holdingRead && !holdingRead.ok ? holdingRead.error : undefined },
     buyingPower,
     openOrders: { status: orderRead?.ok ? 'ok' : 'partial_failure', count: openOrders.length, items: redactSensitive(openOrders) },
-    positionWeights: useKrwWeights ? { status: positionStatus, basis: 'KRW-converted holdings plus cash buying power', fx: { USDKRW: usdKrw }, holdingsValueKrw, cashValueKrw: foundCashValue ? cashValueKrw : undefined, totalValueKrw } : { status: positionStatus, reason: fxUnavailable ? 'fx_unavailable' : undefined, basis: fxUnavailable ? 'KRW/USD mixed holdings require USD/KRW exchange-rate data' : 'holding valuationAmount/evaluationAmount/marketValue when supplied by official API' },
+    positionWeights: useKrwWeights && positionStatus === 'calculated' ? { status: positionStatus, reason: positionReason, basis: cashStatus === 'partial' ? 'KRW-converted holdings plus available cash buying power; omitted cash currencies are listed' : 'KRW-converted holdings plus cash buying power', fx: usdKrw !== undefined ? { USDKRW: usdKrw } : undefined, holdingsValueKrw, cashValueKrw, cashStatus, omittedCashCurrencies: cashStatus === 'partial' ? omittedCashCurrencies : undefined, totalValueKrw } : { status: positionStatus, reason: positionReason, basis: fxUnavailable ? 'USD-valued holdings or cash require USD/KRW exchange-rate data' : 'KRW-converted holdings plus cash buying power' },
     warningFlags,
     partialFailures,
     dataFreshness: { generatedAt: nowIso(), sources: reads.map((read) => ({ source: read.label, ok: read.ok, fetchedAt: read.fetchedAt })) }
