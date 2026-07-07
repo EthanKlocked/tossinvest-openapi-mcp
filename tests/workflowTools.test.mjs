@@ -46,7 +46,8 @@ test('portfolio_snapshot unfolds official holdings result.items payload', async 
       }
     }), { status: 200 });
     if (String(input).includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
-    if (String(input).includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    if (String(input).includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    if (String(input).includes('/api/v1/buying-power?currency=USD')) return new Response(JSON.stringify({ result: { cashBuyingPower: 0 } }), { status: 200 });
     return new Response('{}', { status: 200 });
   });
 
@@ -83,6 +84,77 @@ test('portfolio_snapshot calculates mixed-currency weights using FX and cash-inc
   assert.equal(snapshot.holdings.items[1].valueKrw, 1000);
   assert.equal(snapshot.holdings.items[0].weight, 0.25);
   assert.equal(snapshot.holdings.items[1].weight, 0.25);
+});
+
+test('portfolio_snapshot uses cash-inclusive denominator for single-currency holdings', async () => {
+  const deps = makeDeps({}, async (input) => {
+    const url = String(input);
+    if (url.endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (url.includes('/api/v1/holdings')) return new Response(JSON.stringify({ result: { items: [
+      { symbol: '005930', name: 'Samsung', currency: 'KRW', quantity: '1', marketValue: { amount: '1000' } }
+    ] } }), { status: 200 });
+    if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000 } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=USD')) return new Response(JSON.stringify({ result: { cashBuyingPower: 0 } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1 }, deps);
+  assert.equal(snapshot.positionWeights.status, 'calculated');
+  assert.equal(snapshot.positionWeights.basis, 'KRW-converted holdings plus cash buying power');
+  assert.equal(snapshot.positionWeights.totalValueKrw, 2000);
+  assert.equal(snapshot.holdings.items[0].valueKrw, 1000);
+  assert.equal(snapshot.holdings.items[0].weight, 0.5);
+});
+
+test('portfolio_snapshot uses both cash currencies for denominator even when buyingPower response is filtered', async () => {
+  const calls = [];
+  const deps = makeDeps({}, async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (url.includes('/api/v1/holdings')) return new Response(JSON.stringify({ result: { items: [
+      { symbol: '005930', currency: 'KRW', quantity: '1', marketValue: { amount: '1000' } },
+      { symbol: 'AAPL', currency: 'USD', quantity: '1', marketValue: { amount: '1' } }
+    ] } }), { status: 200 });
+    if (url.includes('/api/v1/exchange-rate')) return new Response(JSON.stringify({ result: { rate: 1000 } }), { status: 200 });
+    if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000 } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=USD')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1 } }), { status: 200 });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1, currencies: ['KRW'] }, deps);
+  assert.equal(snapshot.positionWeights.totalValueKrw, 4000);
+  assert.equal(snapshot.holdings.items[0].weight, 0.25);
+  assert.equal(snapshot.holdings.items[1].weight, 0.25);
+  assert.deepEqual(Object.keys(snapshot.buyingPower), ['KRW']);
+  assert.equal(calls.some((url) => url.includes('/api/v1/buying-power?currency=USD')), true);
+});
+
+test('portfolio_snapshot surfaces incomplete cash denominator when a buying-power read fails', async () => {
+  const deps = makeDeps({}, async (input) => {
+    const url = String(input);
+    if (url.endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    if (url.includes('/api/v1/holdings')) return new Response(JSON.stringify({ result: { items: [
+      { symbol: '005930', currency: 'KRW', quantity: '1', marketValue: { amount: '1000' } },
+      { symbol: 'AAPL', currency: 'USD', quantity: '1', marketValue: { amount: '1' } }
+    ] } }), { status: 200 });
+    if (url.includes('/api/v1/exchange-rate')) return new Response(JSON.stringify({ result: { rate: 1000 } }), { status: 200 });
+    if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000 } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=USD')) return new Response(JSON.stringify({ message: 'cash unavailable' }), { status: 503, headers: { 'Retry-After': '0' } });
+    return new Response('{}', { status: 200 });
+  });
+
+  const snapshot = await executeTool('portfolio_snapshot', { accountSeq: 1 }, deps);
+  assert.equal(snapshot.status, 'partial');
+  assert.equal(snapshot.positionWeights.status, 'calculated');
+  assert.equal(snapshot.positionWeights.reason, 'cash_incomplete');
+  assert.equal(snapshot.positionWeights.cashStatus, 'partial');
+  assert.deepEqual(snapshot.positionWeights.omittedCashCurrencies, ['USD']);
+  assert.equal(snapshot.positionWeights.totalValueKrw, 3000);
+  assert.ok(snapshot.partialFailures.some((failure) => failure.source === 'buyingPower.USD.denominator'));
 });
 
 test('portfolio_snapshot marks mixed-currency weights not calculable when FX is unavailable', async () => {
@@ -122,7 +194,8 @@ test('portfolio_snapshot retries transient holdings 429 and returns a complete s
       return new Response(JSON.stringify({ result: { items: [{ symbol: '005930', quantity: 1, valuationAmount: 70000 }] } }), { status: 200 });
     }
     if (url.includes('/api/v1/orders?')) return new Response(JSON.stringify({ result: { items: [] } }), { status: 200 });
-    if (url.includes('/api/v1/buying-power')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=KRW')) return new Response(JSON.stringify({ result: { cashBuyingPower: 1000000 } }), { status: 200 });
+    if (url.includes('/api/v1/buying-power?currency=USD')) return new Response(JSON.stringify({ result: { cashBuyingPower: 0 } }), { status: 200 });
     return new Response('{}', { status: 200 });
   });
 
