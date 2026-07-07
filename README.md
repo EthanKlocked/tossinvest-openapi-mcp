@@ -119,7 +119,7 @@ Read-only tools:
 
 Workflow tools:
 
-- `portfolio_snapshot` — reads holdings, KRW/USD buying power, open orders, calculable position weights, account/accountSeq state, warning flags, and partial failures.
+- `portfolio_snapshot` — reads holdings, KRW/USD buying power, open orders, calculable position weights, account/accountSeq state, warning flags, and partial failures. Position weights use a KRW-converted, cash-inclusive denominator (holdings + KRW/USD cash buying power); when `cashStatus` is `partial`, omitted cash currencies are listed in `omittedCashCurrencies`.
 - `pre_trade_check` — separate read/check layer for candidate orders; returns `canProceedDryRun`, `realOrderBlockedByDefault`, `checks`, `warnings`, `blockers`, `missing`, `estimate`, and `dataFreshness`.
 - `order_preview` — creates an in-memory preview contract; returns `previewId`, `requestHash`, `ttlSeconds`, `expiresAt`, exact `confirmationText`, estimated amount/fee/cash/quantity checks, gate status, risk flags, and calculability notes. It never calls order POST endpoints. Default TTL: 90 seconds; max accepted TTL: 300 seconds.
 - `order_execute` — fast preview-based submission; requires `previewId`, matching `requestHash`, exact confirmation (`I approve this exact Toss order preview`), unexpired preview, env gates, and optional delegated-authority bounds. It does not run `pre_trade_check` in the hot path and does not add automatic order POST retry.
