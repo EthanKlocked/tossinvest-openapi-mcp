@@ -155,7 +155,9 @@ export class TossInvestClient {
         continue;
       }
       if (method === 'GET' && shouldRetryGetResponse(response, retryableAttempt)) {
-        await sleep(retryDelayMs(response, retryableAttempt));
+        const delayMs = retryDelayMs(response, retryableAttempt);
+        if (typeof delayMs !== 'number') break;
+        await sleep(delayMs);
         retryableAttempt += 1;
         ({ response, payload } = await execute(token));
         continue;
@@ -178,19 +180,27 @@ function isInvalidTokenResponse(response: Response, payload: unknown): boolean {
   return containsInvalidToken(payload);
 }
 
+const MAX_RETRY_DELAY_MS = 10_000;
+
 function shouldRetryGetResponse(response: Response, attempt: number): boolean {
-  if (response.status === 429) return attempt < 3;
-  if ([502, 503, 504].includes(response.status)) return attempt < 2;
+  if (response.status === 429 && attempt < 3) return retryDelayMs(response, attempt) !== undefined;
+  if ([502, 503, 504].includes(response.status) && attempt < 2) return retryDelayMs(response, attempt) !== undefined;
   return false;
 }
 
-function retryDelayMs(response: Response, attempt: number): number {
+function retryDelayMs(response: Response, attempt: number): number | undefined {
   const retryAfter = response.headers.get('Retry-After');
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      const delay = seconds * 1000;
+      return delay <= MAX_RETRY_DELAY_MS ? delay : undefined;
+    }
     const retryAt = Date.parse(retryAfter);
-    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - Date.now());
+    if (Number.isFinite(retryAt)) {
+      const delay = Math.max(0, retryAt - Date.now());
+      return delay <= MAX_RETRY_DELAY_MS ? delay : undefined;
+    }
   }
   return Math.min(4000, 1000 * 2 ** attempt);
 }

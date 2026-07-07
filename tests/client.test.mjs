@@ -104,6 +104,20 @@ test('GET retry exhaustion preserves HTTP status in the thrown error', async () 
   assert.equal(calls.filter((input) => input.includes('/api/v1/holdings')).length, 4);
 });
 
+test('GET does not block on Retry-After values above the local cap', { timeout: 800 }, async () => {
+  const startedAt = Date.now();
+  const calls = [];
+  const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input) => {
+    calls.push(String(input));
+    if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
+    return new Response(JSON.stringify({ message: 'slow retry-after' }), { status: 429, headers: { 'Retry-After': '60' } });
+  });
+
+  await assert.rejects(client.get('/api/v1/holdings', { accountRequired: true, accountSeq: 1 }), /failed \(429\)/);
+  assert.ok(Date.now() - startedAt < 800);
+  assert.equal(calls.filter((input) => input.includes('/api/v1/holdings')).length, 1);
+});
+
 test('auth status separates token issuance from data endpoint reachability and accountSeq configuration', async () => {
   const client = new TossInvestClient(loadConfig({ TOSS_API_KEY: 'key', TOSS_SECRET_KEY: 'secret' }), async (input) => {
     if (String(input).endsWith('/oauth2/token')) return new Response(JSON.stringify({ access_token: 'token', expires_in: 3600 }), { status: 200 });
