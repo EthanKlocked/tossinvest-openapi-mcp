@@ -11,7 +11,7 @@ This package is designed for developers who want read-only account, market, and 
 - Uses only the official Toss Open API server: `https://openapi.tossinvest.com`
 - Starts without credentials; `auth_status` reports missing configuration instead of crashing.
 - Keeps OAuth access tokens in memory only.
-- On `401 invalid-token` data API responses, discards the cached token, requests a fresh OAuth token, and retries the original request once.
+- On eligible GET `401 invalid-token` or `401 token-revoked` responses, replaces the affected cached token and retries once; concurrent issuance is shared within a client instance.
 - `auth_status` separates token issuance from data endpoint reachability and reports whether a default `TOSS_ACCOUNT_SEQ` is configured.
 - Redacts API keys, secrets, bearer tokens, account headers, and account numbers from tool output/errors.
 - Trading is disabled by default.
@@ -144,6 +144,23 @@ Trading tools:
 - `accountSeqRequiredForAccountTools`: `true`; account-scoped tools need either a per-call `accountSeq` or `TOSS_ACCOUNT_SEQ`.
 
 Most market-data tools such as `prices`, `orderbook`, `trades`, and `stock_info` do not require `accountSeq`. Account-scoped tools such as `holdings`, `orders_open`, `orders_closed`, `order_detail`, `buying_power`, `sellable_quantity`, `commissions`, and real/dry-run order tools require `accountSeq` via the tool arguments or `TOSS_ACCOUNT_SEQ`.
+
+### Token recovery and diagnostics
+
+Token recovery matches exact structured `code` or `error.code` values (`invalid-token`, `token-revoked`) on HTTP 401 only. When present, `error.code` takes precedence even if unrelated or conflicting; the top-level `code` is used only when the nested code is absent (for example, an `error` object containing only `message`). Messages, arbitrary nested strings, and unrelated 401 errors do not trigger issuance. GET requests permit at most one authentication retry; a second rejection is returned as an API error. Existing POST `invalid-token` retry behavior is preserved, but **POST `token-revoked` is never replayed**. The internal `retryInvalidToken: false` option disables both authentication recovery codes, including order execution paths that already opt out. Ambiguous order outcomes still require reconciliation, not automatic replay.
+
+Tokens remain memory-only, using `expires_in` with the existing 30-second expiry margin (and existing 60-second minimum lifetime / 3600-second default). Concurrent cold starts and refreshes share one in-flight issuance per client instance. Cache generations use object identity, so a late rejection cannot discard a newer generation even if the provider returns the same token string. This does not coordinate separate processes or external clients. There is no periodic issuance or refresh-token grant.
+
+`auth_status` adds `tokenLifecycle` when credentials are configured: a snapshot of the latest **issuance attempt**, not proof of data API acceptance. Existing status fields remain; use `dataApiReachable` / `dataApiCheck` to check data access, including repeated token rejection.
+
+- `reason`: `cold-cache`, `expiry-margin`, `invalid-token`, or `token-revoked`.
+- `startedAt`, `completedAt`, `expiresAt`: Unix epoch milliseconds; completion/expiry can be `null` while pending or when unavailable.
+- `durationMs`: elapsed issuance milliseconds, or `null` while pending.
+- `outcome`: `pending`, `succeeded`, or `failed`.
+
+Diagnostics contain only these fixed categories and timing values, never tokens, credentials, headers, provider bodies, or raw network messages. Issuance failures return a safe actionable configuration/network error; a later request can try issuance again. No new environment variables or required tool arguments are introduced.
+
+After updating source, run `npm run build` and restart the MCP subprocess to load the new build. Deployment and read-only verification in the consuming environment are separate operator steps; source tests do not prove that runtime has been upgraded.
 
 ## Endpoint mapping
 
@@ -337,7 +354,7 @@ Optional account-scoped checks can use `TOSS_ACCOUNT_SEQ`, but the default smoke
 
 ### Timeout/retry policy
 
-This server applies a configurable request timeout to OAuth, read-only calls, and order calls. It intentionally does not add broad automatic retries: read-only retry policy should be based on observed Toss API behavior, and order POST retries are disabled unless official idempotency guarantees are documented. The only automatic retry remains the existing one-time token refresh/retry for a `401 invalid-token` response.
+This server applies a configurable request timeout to OAuth, read-only calls, and order calls. GETs retain bounded transient retries: up to three for HTTP 429 and two for HTTP 502/503/504, with retry delays capped at 10 seconds. Authentication recovery is separately bounded to one retry as described above. POSTs do not receive transient retries or new `token-revoked` replay; existing `invalid-token` behavior and per-call opt-outs are unchanged. Never retry an ambiguous order outcome without reconciliation.
 
 ## Release checklist
 

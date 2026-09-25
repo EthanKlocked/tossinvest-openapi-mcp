@@ -16,8 +16,21 @@ export interface RequestOptions {
   retryInvalidToken?: boolean;
 }
 
+type TokenReason = 'cold-cache' | 'expiry-margin' | 'invalid-token' | 'token-revoked';
+interface TokenLifecycle {
+  reason: TokenReason;
+  startedAt: number;
+  completedAt: number | null;
+  durationMs: number | null;
+  expiresAt: number | null;
+  outcome: 'pending' | 'succeeded' | 'failed';
+}
+
 export class TossInvestClient {
+  // Each cache object is a distinct generation, even if token strings repeat.
   private tokenCache?: TokenCache;
+  private tokenIssuance?: Promise<TokenCache>;
+  private tokenLifecycle?: TokenLifecycle;
 
   constructor(private readonly config: TossInvestConfig, private readonly fetcher: FetchLike = fetch) {}
 
@@ -38,6 +51,7 @@ export class TossInvestClient {
     } catch (error) {
       return {
         ...baseStatus,
+        tokenLifecycle: this.tokenLifecycle ? { ...this.tokenLifecycle } : null,
         tokenAvailable: false,
         dataApiReachable: false,
         authenticated: false,
@@ -49,6 +63,7 @@ export class TossInvestClient {
       await this.request('GET', '/api/v1/accounts', {});
       return {
         ...baseStatus,
+        tokenLifecycle: this.tokenLifecycle ? { ...this.tokenLifecycle } : null,
         tokenAvailable: true,
         dataApiReachable: true,
         authenticated: true,
@@ -58,6 +73,7 @@ export class TossInvestClient {
     } catch (error) {
       return {
         ...baseStatus,
+        tokenLifecycle: this.tokenLifecycle ? { ...this.tokenLifecycle } : null,
         tokenAvailable: true,
         dataApiReachable: false,
         authenticated: false,
@@ -75,30 +91,58 @@ export class TossInvestClient {
     return this.request('POST', path, options);
   }
 
-  private async getToken(): Promise<string> {
+  private async getToken(reason?: TokenReason): Promise<TokenCache> {
     if (!this.config.apiKey || !this.config.secretKey) {
       throw new Error('Missing TOSS_API_KEY or TOSS_SECRET_KEY');
     }
+    if (this.tokenIssuance) return this.tokenIssuance;
     const now = Date.now();
-    if (this.tokenCache && this.tokenCache.expiresAt > now + 30_000) return this.tokenCache.token;
+    if (this.tokenCache && this.tokenCache.expiresAt > now + 30_000) return this.tokenCache;
 
-    const body = new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: this.config.apiKey,
-      client_secret: this.config.secretKey
-    });
-    const response = await this.fetchWithTimeout(`${this.config.baseUrl}/oauth2/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body
-    });
-    const payload = await parseResponse(response);
-    if (!response.ok) throw new Error(`Toss OAuth failed: ${JSON.stringify(redactSensitive(payload))}`);
-    const accessToken = String((payload as Record<string, unknown>).access_token ?? '');
-    if (!accessToken) throw new Error('Toss OAuth response did not include access_token');
-    const expiresIn = Number((payload as Record<string, unknown>).expires_in ?? 3600);
-    this.tokenCache = { token: accessToken, expiresAt: now + Math.max(60, expiresIn) * 1000 };
-    return accessToken;
+    const diagnostic: TokenLifecycle = {
+      reason: reason ?? (this.tokenCache ? 'expiry-margin' : 'cold-cache'),
+      startedAt: now, completedAt: null, durationMs: null, expiresAt: null, outcome: 'pending'
+    };
+    this.tokenLifecycle = diagnostic;
+    this.tokenCache = undefined;
+    this.tokenIssuance = this.issueToken(now, diagnostic);
+    try {
+      return await this.tokenIssuance;
+    } finally {
+      this.tokenIssuance = undefined;
+    }
+  }
+
+  private async issueToken(now: number, diagnostic: TokenLifecycle): Promise<TokenCache> {
+    try {
+      const body = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: this.config.apiKey!,
+        client_secret: this.config.secretKey!
+      });
+      const response = await this.fetchWithTimeout(`${this.config.baseUrl}/oauth2/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body
+      });
+      const payload = await parseResponse(response);
+      if (!response.ok) throw new Error('OAuth rejected');
+      const data = payload as Record<string, unknown> | null;
+      const accessToken = data?.access_token;
+      if (typeof accessToken !== 'string' || !accessToken) throw new Error('Missing access token');
+      const expiresIn = Number(data?.expires_in ?? 3600);
+      this.tokenCache = { token: accessToken, expiresAt: now + Math.max(60, expiresIn) * 1000 };
+      diagnostic.expiresAt = this.tokenCache.expiresAt;
+      diagnostic.outcome = 'succeeded';
+      return this.tokenCache;
+    } catch {
+      diagnostic.outcome = 'failed';
+      // Never carry provider bodies, network messages, or credentials into diagnostics/errors.
+      throw new Error('Toss OAuth token issuance failed. Check TOSS_API_KEY/TOSS_SECRET_KEY configuration and network availability, then retry the read. Reconcile any prior order before resubmitting.');
+    } finally {
+      diagnostic.completedAt = Date.now();
+      diagnostic.durationMs = Math.max(0, diagnostic.completedAt - now);
+    }
   }
 
   private async fetchWithTimeout(input: string | URL, init: RequestInit): Promise<Response> {
@@ -145,13 +189,15 @@ export class TossInvestClient {
     let token = await this.getToken();
     let invalidTokenRetried = false;
     let retryableAttempt = 0;
-    let { response, payload } = await execute(token);
+    let { response, payload } = await execute(token.token);
     while (true) {
-      if (options.retryInvalidToken !== false && !invalidTokenRetried && isInvalidTokenResponse(response, payload)) {
-        this.tokenCache = undefined;
-        token = await this.getToken();
+      const authCode = recoverableAuthCode(response, payload);
+      if (options.retryInvalidToken !== false && !invalidTokenRetried && authCode
+        && (method === 'GET' || authCode === 'invalid-token')) {
+        if (this.tokenCache === token) this.tokenCache = undefined;
+        token = await this.getToken(authCode);
         invalidTokenRetried = true;
-        ({ response, payload } = await execute(token));
+        ({ response, payload } = await execute(token.token));
         continue;
       }
       if (method === 'GET' && shouldRetryGetResponse(response, retryableAttempt)) {
@@ -159,7 +205,7 @@ export class TossInvestClient {
         if (typeof delayMs !== 'number') break;
         await sleep(delayMs);
         retryableAttempt += 1;
-        ({ response, payload } = await execute(token));
+        ({ response, payload } = await execute(token.token));
         continue;
       }
       break;
@@ -175,9 +221,13 @@ export class TossInvestClient {
   }
 }
 
-function isInvalidTokenResponse(response: Response, payload: unknown): boolean {
-  if (response.status !== 401) return false;
-  return containsInvalidToken(payload);
+function recoverableAuthCode(response: Response, payload: unknown): 'invalid-token' | 'token-revoked' | undefined {
+  if (response.status !== 401 || typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined;
+  const envelope = payload as Record<string, unknown>;
+  const error = envelope.error;
+  const code = typeof error === 'object' && error !== null && !Array.isArray(error) && 'code' in error
+    ? (error as Record<string, unknown>).code : envelope.code;
+  return code === 'invalid-token' || code === 'token-revoked' ? code : undefined;
 }
 
 const MAX_RETRY_DELAY_MS = 10_000;
@@ -207,13 +257,6 @@ function retryDelayMs(response: Response, attempt: number): number | undefined {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function containsInvalidToken(value: unknown): boolean {
-  if (typeof value === 'string') return value.toLowerCase() === 'invalid-token';
-  if (Array.isArray(value)) return value.some((item) => containsInvalidToken(item));
-  if (typeof value !== 'object' || value === null) return false;
-  return Object.values(value as Record<string, unknown>).some((item) => containsInvalidToken(item));
 }
 
 async function parseResponse(response: Response): Promise<unknown> {
