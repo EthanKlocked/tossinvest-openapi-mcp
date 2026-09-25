@@ -140,7 +140,10 @@ test('auth status separates token issuance from data endpoint reachability and a
     return new Response('{}', { status: 404 });
   });
 
-  assert.deepEqual(await client.authStatus(), {
+  const { tokenLifecycle, ...status } = await client.authStatus();
+  assert.equal(tokenLifecycle.reason, 'invalid-token');
+  assert.equal(tokenLifecycle.outcome, 'succeeded');
+  assert.deepEqual(status, {
     configured: true,
     tokenAvailable: true,
     dataApiReachable: false,
