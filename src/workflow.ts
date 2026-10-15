@@ -97,6 +97,29 @@ function quantityOf(value: unknown): number | undefined {
   return numberValue(record.quantity ?? record.qty ?? record.orderQuantity ?? record.sellableQuantity);
 }
 
+// Only interpret quantity fields from the sellable endpoint, never holdings or money.
+function sellableQuantityOf(value: unknown): number | undefined {
+  let quantity: number | undefined;
+  let invalid = false;
+  const visit = (payload: unknown, depth: number): void => {
+    if (depth > 8) { invalid = true; return; }
+    const record = asRecord(payload);
+    for (const key of ['sellableQuantity', 'quantity', 'qty', 'orderQuantity']) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      const raw = record[key];
+      const parsed = typeof raw === 'number' ? raw
+        : typeof raw === 'string' && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+      if (!Number.isFinite(parsed) || parsed < 0 || (quantity !== undefined && quantity !== parsed)) invalid = true;
+      else quantity = parsed;
+    }
+    for (const key of ['result', 'data', 'payload', 'body']) {
+      if (Object.prototype.hasOwnProperty.call(record, key)) visit(record[key], depth + 1);
+    }
+  };
+  visit(value, 0);
+  return invalid ? undefined : quantity;
+}
+
 function amountOf(value: unknown, depth = 0): number | undefined {
   const record = asRecord(value);
   const direct = numberValue(
@@ -518,11 +541,11 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
     const sellable = await safeRead('sellable_quantity', () => deps.client.get('/api/v1/sellable-quantity', { query: { symbol }, accountRequired: true, accountSeq: numberValue(args.accountSeq) }));
     reads.push(sellable);
     if (sellable.ok) {
-      const sellableQty = quantityOf(sellable.data) ?? amountOf(sellable.data);
+      const sellableQty = sellableQuantityOf(sellable.data);
       const quantity = numberValue(request.quantity);
       if (sellableQty !== undefined && quantity !== undefined && sellableQty < quantity) blockers.push(check('insufficient_sellable_quantity', 'blocker', 'Requested sell quantity exceeds sellable quantity.', { sellableQty, quantity }));
       else if (sellableQty !== undefined) checks.push(check('sellable_quantity_sufficient', 'pass', 'Sellable quantity is sufficient.', { sellableQty, quantity }));
-      else missing.push(check('sellable_quantity_not_calculable', 'missing', 'Sellable quantity was not present in official payload.'));
+      else missing.push(check('sellable_quantity_not_calculable', 'missing', 'Sellable quantity was missing, invalid, or conflicting in official payload.'));
     } else warnings.push(check('sellable_quantity_unavailable', 'warning', sellable.error));
   }
 
@@ -609,8 +632,8 @@ export async function orderPreview(args: JsonRecord, deps: ToolDeps) {
     currency: evaluation.currency,
     fee: evaluation.checks.find((item) => item.code === 'commission_estimated') ?? (evaluation.checks.some((item) => item.code === 'commission_payload_available') ? { status: 'source_payload_available' } : { status: 'not_calculable' }),
     cashCheck: evaluation.checks.find((item) => item.code === 'buying_power_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_buying_power') ?? { status: 'not_calculable' },
-    quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? { status: 'not_applicable_or_not_calculable' },
-    gate: { status: evaluation.blockers.length === 0 ? 'pass' : 'blocked', blockers: evaluation.blockers, warnings: evaluation.warnings, missing: evaluation.missing },
+    quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? evaluation.missing.find((item) => item.code === 'sellable_quantity_not_calculable') ?? { status: 'not_applicable_or_not_calculable' },
+    gate: { status: executable ? 'pass' : 'blocked', blockers: evaluation.blockers, warnings: evaluation.warnings, missing: evaluation.missing },
     impact: {
       postOrderCash: evaluation.estimatedAmount !== undefined ? { status: 'partially_calculable', reason: 'available buying power payload shape varies; caller should reconcile with portfolio_snapshot after execution' } : { status: 'not_calculable', reason: 'estimated amount unavailable' },
       positionWeight: { status: 'not_calculable', reason: 'requires portfolio valuation snapshot and official filled order result' },
