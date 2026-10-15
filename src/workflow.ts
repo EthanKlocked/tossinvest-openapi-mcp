@@ -506,7 +506,7 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
       }
       else if (state.open === true) checks.push(check('market_open', 'pass', 'Official market calendar indicates market is open.', { market: state.market, date: state.date, nextBusinessDay: state.nextBusinessDay, session: state.session, rawStatus: state.rawStatus }));
       else missing.push(check('market_open_unknown', 'missing', 'Market open state was not present in the official payload.', { market: state.market, date: state.date, nextBusinessDay: state.nextBusinessDay, session: state.session, rawStatus: state.rawStatus }));
-    } else warnings.push(check('market_calendar_unavailable', 'warning', market.error));
+    } else missing.push(check('market_calendar_unavailable', 'missing', 'Required market calendar read failed; market availability cannot be verified.', { error: market.error }));
 
     const stockWarnings = await safeRead('stock_warnings', () => deps.client.get(`/api/v1/stocks/${encodeURIComponent(symbol)}/warnings`, { query: {} }));
     reads.push(stockWarnings);
@@ -546,7 +546,7 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
       if (sellableQty !== undefined && quantity !== undefined && sellableQty < quantity) blockers.push(check('insufficient_sellable_quantity', 'blocker', 'Requested sell quantity exceeds sellable quantity.', { sellableQty, quantity }));
       else if (sellableQty !== undefined) checks.push(check('sellable_quantity_sufficient', 'pass', 'Sellable quantity is sufficient.', { sellableQty, quantity }));
       else missing.push(check('sellable_quantity_not_calculable', 'missing', 'Sellable quantity was missing, invalid, or conflicting in official payload.'));
-    } else warnings.push(check('sellable_quantity_unavailable', 'warning', sellable.error));
+    } else missing.push(check('sellable_quantity_unavailable', 'missing', 'Required sellable quantity read failed; available sell quantity cannot be verified.', { error: sellable.error }));
   }
 
   const commissions = await safeRead('commissions', () => deps.client.get('/api/v1/commissions', { accountRequired: true, accountSeq: numberValue(args.accountSeq) }));
@@ -632,7 +632,7 @@ export async function orderPreview(args: JsonRecord, deps: ToolDeps) {
     currency: evaluation.currency,
     fee: evaluation.checks.find((item) => item.code === 'commission_estimated') ?? (evaluation.checks.some((item) => item.code === 'commission_payload_available') ? { status: 'source_payload_available' } : { status: 'not_calculable' }),
     cashCheck: evaluation.checks.find((item) => item.code === 'buying_power_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_buying_power') ?? { status: 'not_calculable' },
-    quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? evaluation.missing.find((item) => item.code === 'sellable_quantity_not_calculable') ?? { status: 'not_applicable_or_not_calculable' },
+    quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? evaluation.missing.find((item) => item.code === 'sellable_quantity_not_calculable' || item.code === 'sellable_quantity_unavailable') ?? { status: 'not_applicable_or_not_calculable' },
     gate: { status: executable ? 'pass' : 'blocked', blockers: evaluation.blockers, warnings: evaluation.warnings, missing: evaluation.missing },
     impact: {
       postOrderCash: evaluation.estimatedAmount !== undefined ? { status: 'partially_calculable', reason: 'available buying power payload shape varies; caller should reconcile with portfolio_snapshot after execution' } : { status: 'not_calculable', reason: 'estimated amount unavailable' },

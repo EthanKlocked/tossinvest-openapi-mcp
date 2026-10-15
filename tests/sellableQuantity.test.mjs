@@ -7,7 +7,7 @@ import { clearPreviewStoreForTests } from '../dist/workflow.js';
 const request = { symbol: 'TEST', side: 'SELL', orderType: 'LIMIT', quantity: '4', price: '10', currency: 'USD' };
 function fixture(payload) {
   const calls = [];
-  const config = loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_USD: '10000' });
+  const config = loadConfig({ ENABLE_TRADING: 'true', ENABLE_ORDER_CREATE: 'true', MAX_ORDER_USD: '10000', MAX_ORDER_KRW: '1000000' });
   const client = {
     async get(path, options) {
       calls.push({ path, options });
@@ -23,6 +23,39 @@ function fixture(payload) {
     async post() { assert.fail('Order POST forbidden'); }
   };
   return { client, config, calls };
+}
+
+for (const side of ['BUY', 'SELL']) {
+  for (const market of ['US', 'KR']) {
+    const sources = side === 'SELL' ? ['sellable_quantity', 'market_calendar', 'both'] : ['market_calendar'];
+    for (const source of sources) test(`required read failure ${side} ${market} ${source} fails closed`, async () => {
+      clearPreviewStoreForTests();
+      const deps = fixture({ result: { sellableQuantity: '8' } });
+      const get = deps.client.get;
+      deps.client.get = async (path, options) => {
+        if ((source !== 'market_calendar' && path === '/api/v1/sellable-quantity')
+          || (source !== 'sellable_quantity' && path.includes('market-calendar'))) throw new Error('Synthetic upstream unavailable');
+        return get(path, options);
+      };
+      const args = { request: { ...request, side, symbol: market === 'KR' ? '000000' : 'TEST', currency: market === 'KR' ? 'KRW' : 'USD' } };
+      const check = await executeTool('pre_trade_check', args, deps);
+      const preview = await executeTool('order_preview', args, deps);
+      assert.equal(check.canProceedDryRun, false);
+      assert.equal(preview.executable, false);
+      assert.equal(preview.gate.status, 'blocked');
+      const codes = source === 'both' ? ['sellable_quantity_unavailable', 'market_calendar_unavailable'] : [`${source}_unavailable`];
+      for (const code of codes) {
+        for (const missing of [check.missing, preview.gate.missing]) {
+          assert.ok(missing.some(item => item.code === code && item.status === 'missing'));
+        }
+        assert.ok(!check.warnings.some(item => item.code === code));
+      }
+      if (source !== 'market_calendar') {
+        assert.equal(preview.quantityCheck.status, 'missing');
+        assert.equal(preview.quantityCheck.code, 'sellable_quantity_unavailable');
+      }
+    });
+  }
 }
 
 const cases = [];
