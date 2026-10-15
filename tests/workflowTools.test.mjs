@@ -373,7 +373,9 @@ test('order_preview never calls Toss order POST and returns preview contract fie
   assert.match(preview.requestHash, /^[a-f0-9]{64}$/);
   assert.equal(preview.ttlSeconds, 90);
   assert.equal(preview.confirmationText, WORKFLOW_CONFIRMATION_TEXT);
-  assert.equal(preview.gate.status, 'pass');
+  assert.equal(preview.gate.status, 'blocked');
+  assert.equal(preview.executable, false);
+  assert.ok(preview.gate.missing.some((item) => item.code === 'market_open_unknown'));
   assert.equal(calls.some((call) => call.method === 'POST' && !call.input.endsWith('/oauth2/token')), false);
 });
 
