@@ -149,6 +149,38 @@ function amountOf(value: unknown, depth = 0): number | undefined {
   return undefined;
 }
 
+// BUY checks need strict amounts without changing portfolio/holding normalization.
+function buyingPowerAmountOf(value: unknown): number | undefined {
+  let amount: number | undefined;
+  let invalid = false;
+  let found = 0;
+  const visit = (payload: unknown, depth: number): void => {
+    if (depth > 8) { invalid = true; return; }
+    const record = asRecord(payload);
+    for (const key of ['amount', 'availableAmount', 'buyingPower', 'cashBuyingPower', 'cashOrderableAmount', 'orderableAmount', 'availableCash', 'withdrawableAmount', 'cash', 'orderAmount', 'valuationAmount', 'evaluationAmount', 'marketValue']) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+      const raw = record[key];
+      // These monetary wrappers were traversed by the legacy amount parser.
+      if ((key === 'amount' || key === 'marketValue') && raw !== null && typeof raw === 'object' && !Array.isArray(raw)) {
+        const before = found;
+        visit(raw, depth + 1);
+        if (found === before) invalid = true;
+        continue;
+      }
+      const parsed = typeof raw === 'number' ? raw
+        : typeof raw === 'string' && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim()) ? Number(raw.trim()) : NaN;
+      found += 1;
+      if (!Number.isFinite(parsed) || parsed < 0 || (amount !== undefined && amount !== parsed)) invalid = true;
+      else amount = parsed;
+    }
+    for (const key of ['amountAfterCost', 'result', 'data', 'payload', 'body']) {
+      if (Object.prototype.hasOwnProperty.call(record, key)) visit(record[key], depth + 1);
+    }
+  };
+  visit(value, 0);
+  return invalid ? undefined : amount;
+}
+
 function priceOf(value: unknown): number | undefined {
   const record = asRecord(value);
   return numberValue(record.price ?? record.orderPrice ?? record.currentPrice ?? record.close);
@@ -532,11 +564,11 @@ async function evaluateRealityChecks(args: JsonRecord, deps: ToolDeps) {
     const buyingPower = await safeRead('buying_power', () => readBuyingPower(currency, args, deps));
     reads.push(buyingPower);
     if (buyingPower.ok) {
-      const available = amountOf(buyingPower.data);
+      const available = buyingPowerAmountOf(buyingPower.data);
       if (available !== undefined && estimatedAmount !== undefined && available < estimatedAmount) blockers.push(check('insufficient_buying_power', 'blocker', 'Estimated order amount exceeds available buying power.', { available, estimatedAmount, currency }));
       else if (available !== undefined) checks.push(check('buying_power_sufficient', 'pass', 'Buying power is sufficient for estimated amount.', { available, estimatedAmount, currency }));
-      else missing.push(check('buying_power_not_calculable', 'missing', 'Buying power amount was not present in official payload.'));
-    } else warnings.push(check('buying_power_unavailable', 'warning', buyingPower.error));
+      else missing.push(check('buying_power_not_calculable', 'missing', 'Buying power amount was missing, invalid, or conflicting in official payload.'));
+    } else missing.push(check('buying_power_unavailable', 'missing', 'Required buying power read failed; available funds cannot be verified.', { error: buyingPower.error }));
   } else if (side === 'SELL' && symbol) {
     const sellable = await safeRead('sellable_quantity', () => deps.client.get('/api/v1/sellable-quantity', { query: { symbol }, accountRequired: true, accountSeq: numberValue(args.accountSeq) }));
     reads.push(sellable);
@@ -631,7 +663,7 @@ export async function orderPreview(args: JsonRecord, deps: ToolDeps) {
     estimatedAmount: evaluation.estimatedAmount,
     currency: evaluation.currency,
     fee: evaluation.checks.find((item) => item.code === 'commission_estimated') ?? (evaluation.checks.some((item) => item.code === 'commission_payload_available') ? { status: 'source_payload_available' } : { status: 'not_calculable' }),
-    cashCheck: evaluation.checks.find((item) => item.code === 'buying_power_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_buying_power') ?? { status: 'not_calculable' },
+    cashCheck: evaluation.checks.find((item) => item.code === 'buying_power_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_buying_power') ?? evaluation.missing.find((item) => item.code === 'buying_power_not_calculable' || item.code === 'buying_power_unavailable') ?? { status: 'not_calculable' },
     quantityCheck: evaluation.checks.find((item) => item.code === 'sellable_quantity_sufficient') ?? evaluation.blockers.find((item) => item.code === 'insufficient_sellable_quantity') ?? evaluation.missing.find((item) => item.code === 'sellable_quantity_not_calculable' || item.code === 'sellable_quantity_unavailable') ?? { status: 'not_applicable_or_not_calculable' },
     gate: { status: executable ? 'pass' : 'blocked', blockers: evaluation.blockers, warnings: evaluation.warnings, missing: evaluation.missing },
     impact: {
